@@ -90,6 +90,6 @@ uv run jupyter notebook
 
 ## Notes
 
-- Les vidéos THINGS ont un framerate variable — l'extraction de frames se fait par timestamp et non par index.
+- Les vidéos THINGS ont un framerate variable.
 - `exca` est épinglé à `>=0.5.20,<0.5.24` pour assurer la compatibilité avec `neuralset` (dépendance interne de TRIBE v2).
 - Le modèle TRIBE v2 inclut LLaMA 3.2 (modèle gated) — l'accès doit être demandé sur la page HuggingFace de Meta avant le premier téléchargement.
