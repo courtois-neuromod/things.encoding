@@ -1,0 +1,32 @@
+# Environnement virtuel
+.venv/
+
+# Variables d'environnement (tokens, secrets)
+.env
+
+# Cache HuggingFace et poids des modèles
+cache/
+
+# Données en entrée
+data/
+
+# Outputs générés
+outputs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
