@@ -3,7 +3,7 @@ name = "things-encoding"
 version = "0.1.0"
 description = "Extraction de représentations latentes TRIBE v2 sur les vidéos THINGS"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.12,<3.14"
 
 dependencies = [
     "tribev2 @ git+https://github.com/facebookresearch/tribev2.git",
@@ -16,6 +16,7 @@ dependencies = [
     "tqdm>=4.66.0",
     "huggingface-hub>=0.23.0",
     "ipykernel>=7.2.0",
+    "neuralfetch-cneuromod @ git+https://github.com/courtois-neuromod/neuralfetch-cneuromod.git",
 ]
 
 [tool.hatch.metadata]
