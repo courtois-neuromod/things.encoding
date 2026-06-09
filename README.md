@@ -39,7 +39,7 @@ Le token est disponible sur [huggingface.co/settings/tokens](https://huggingface
 ### 4. Vérifier l'installation
 
 ```bash
-uv run python hello_tribe.py
+uv run python test_single_stimulus.py
 ```
 
 Le modèle TRIBE v2 se télécharge dans `./cache/` au premier lancement (~quelques Go). Les lancements suivants utilisent le cache local.

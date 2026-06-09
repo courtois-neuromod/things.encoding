@@ -17,6 +17,8 @@ dependencies = [
     "huggingface-hub>=0.23.0",
     "ipykernel>=7.2.0",
     "neuralfetch-cneuromod @ git+https://github.com/courtois-neuromod/neuralfetch-cneuromod.git",
+    "transformers>=4.40.0,<5.0.0",
+    "ffmpeg-python>=0.2.0",
 ]
 
 [tool.hatch.metadata]
