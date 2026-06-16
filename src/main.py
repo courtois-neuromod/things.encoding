@@ -61,6 +61,7 @@ if __name__ == '__main__':
 
     fmri_enc = model.__pydantic_private__['_model']
     #for file in Path(STIMULI_DIR).rglob("*.mp4"):
+
     for i in range(1):
         file = "stimulus_0000.mp4"
         events = model.get_events_dataframe(video_path=str(STIMULI_DIR / file))
@@ -87,10 +88,11 @@ if __name__ == '__main__':
         print(f"Hooks enregistrés : {len(_hooks)}")
         print(events)
 
-        """"
         # --- forward pass ---
         
         model.predict(events)
+        print("data frequency : ", model.data.neuro.frequency)
+        print("tribe TR : ", model.data.TR)
 
         # Récupérer les features
         result = {}
@@ -122,4 +124,3 @@ if __name__ == '__main__':
     # Sauvegarde HDF5
     writer = HDF5Writer(HDF5_PATH)
     writer.sauvegarder(features, subject, session, run, nb_stimuli)
-    """
