@@ -6,6 +6,7 @@
 
 # Cache HuggingFace et poids des modèles
 cache/
+../hf_cache/
 
 # Données en entrée
 data/
@@ -14,6 +15,10 @@ things-cfr/
 
 # Outputs générés
 outputs/
+script.sh
+slurm*.out
+slurm-14371942.out
+*.mp4
 
 # Python
 __pycache__/
