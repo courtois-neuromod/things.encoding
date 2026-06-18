@@ -27,5 +27,7 @@ class Config():
             self.model = TribeModel.from_pretrained(
                 "facebook/tribev2",
                 cache_folder="./cache",
+		device="cuda",
+                config_update={"data.video_feature.image.device": "cuda"},
             )
         return self.model
