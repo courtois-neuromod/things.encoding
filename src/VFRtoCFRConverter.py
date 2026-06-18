@@ -70,7 +70,24 @@ class VFRtoCFRConverter:
 
 
 if __name__ == "__main__":
+  from pathlib import Path
+
   converter = VFRtoCFRConverter(fps=64, crf=20)
-  source = "../data/sub-01/ses-001/sub-01_ses-001_task-thingsmemory_run-1.mp4"
-  output = "../things-cfr/sub-01_ses-001_task-thingsmemory_run-1_cfr.mp4"
-  converter.convert(source, output)
+
+  ROOT = Path(__file__).parent.parent
+  DATA_DIR = ROOT / "data"
+  OUTPUT_DIR = ROOT / "things-cfr"
+
+  video_files = sorted(DATA_DIR.glob("**/sub-*_*_task-*.mp4"))
+
+  for i, source_path in enumerate(video_files, 1):
+    subject = source_path.parts[-3]
+    session = source_path.parts[-2]
+
+    output_subdir = OUTPUT_DIR / subject / session
+    output_subdir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_subdir / f"{source_path.stem}_cfr.mp4"
+
+    print(f"\n[{i}/{len(video_files)}] Conversion de {subject}/{session}/{source_path.name}")
+    converter.convert(str(source_path), str(output_path))
