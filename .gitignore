@@ -9,6 +9,8 @@ cache/
 
 # Données en entrée
 data/
+output/
+things-cfr/
 
 # Outputs générés
 outputs/

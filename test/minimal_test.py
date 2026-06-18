@@ -19,8 +19,8 @@ if __name__ == "__main__":
     VIDEO_PATH = "sub-01_ses-001_task-thingsmemory_run-1_cfr.mp4"
 
     # --- Chargement du modèle ---
-    setup = Config(plateforme=None)
-    #setup.charger_env()
+    setup = Config(plateforme="macos")
+    setup.charger_env()
     model = setup.charger_modele()
 
     # --- Lecture du TR  ---
@@ -82,14 +82,14 @@ if __name__ == "__main__":
     print("\nLatents transformer (Cartographie temporelle) :")
     for name, tensor_list in features.items():
         print(f"\nCouche : {name}")
-        
+
         # tensor_list contient autant de tenseurs que de segments traités
         # Au lieu de tout écraser avec torch.cat, on les associe à leur segment
         for i, tensor in enumerate(tensor_list):
             seg_start = getattr(segments[i], 'start', '???')
             # Le tenseur a la forme (B, T, H) où T est à 2 Hz (0.5s)
             print(f"  -> Appartient au Segment {i} (Début: {seg_start} s) | Shape: {tuple(tensor.shape)}")
-            
+
         # Si tu as besoin de tout empiler à la fin pour l'Étape 3 :
         stacked = torch.cat(tensor_list, dim=0)
         print(f"  Shape totale empilée = {tuple(stacked.shape)}")

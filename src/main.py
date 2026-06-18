@@ -8,8 +8,6 @@ import logging
 from pathlib import Path
 import pandas as pd
 from torchcodec.decoders import VideoDecoder
-
-from collections import defaultdict
 import torch
 
 from Config import Config
@@ -57,70 +55,24 @@ if __name__ == '__main__':
     run     = VIDEO_PATH.stem       # "sub-01_ses-001_task-thingsmemory_run-1"
     model   = setup.charger_modele()
 
+    fmri_enc = model.__pydantic_private__['_model']
+
     nb_stimuli = 0
+    for file in sorted(Path(STIMULI_DIR).glob("*.mp4")):
+        stimulus_idx = int(file.stem.split("_")[-1])
 
-    fmri_enc = model.__pydantic_private__['_model']
-    #for file in Path(STIMULI_DIR).rglob("*.mp4"):
+        events = model.get_events_dataframe(video_path=str(file))
 
-    for i in range(1):
-        file = "stimulus_0000.mp4"
-        events = model.get_events_dataframe(video_path=str(STIMULI_DIR / file))
+        hooks = TransformerHooks(fmri_enc)
+        hooks.attacher()
 
-        features = defaultdict(list)
-        _hooks = []
+        with torch.no_grad():
+            preds, segments = model.predict(events)
 
-        def _make_hook(name: str):
-            def hook(module, input, output):
-                out = output[0] if isinstance(output, tuple) else output
-                features[name].append(out.detach().cpu())
+        hooks.retirer()
+        features = hooks.get_features()
 
-            return hook
+        print(f"Stimulus {stimulus_idx} - preds shape: {preds.shape}")
 
-        # Attacher
-        features.clear()
-        _hooks.clear()
-
-        for i, layer_block in enumerate(fmri_enc.encoder.layers):
-            if i % 2 == 0:  # attention only
-                name = f'encoder.layer{i // 2}.attn'
-                _hooks.append(layer_block[1].register_forward_hook(_make_hook(name)))
-
-        print(f"Hooks enregistrés : {len(_hooks)}")
-        print(events)
-
-        # --- forward pass ---
-        
-        model.predict(events)
-        print("data frequency : ", model.data.neuro.frequency)
-        print("tribe TR : ", model.data.TR)
-
-        # Récupérer les features
-        result = {}
-        for layer_name, tensors in features.items():
-            stacked = torch.cat(tensors, dim=0)
-            result[layer_name.replace('.', '_')] = stacked.numpy()
-            print(f"  {layer_name:40s}  shape={tuple(stacked.shape)}")
-
-        # Retirer
-        for h in _hooks:
-            h.remove()
-        _hooks.clear()
-
-    # Extraction des représentations latentes via forward hooks
-    fmri_enc = model.__pydantic_private__['_model']
-    hooks = TransformerHooks(fmri_enc)
-    hooks.attacher()
-
-    events = model.get_events_dataframe(video_path=str(stimulus_path))
-    import torch
-    with torch.no_grad():
-        preds, segments = model.predict(events)
-
-    hooks.retirer()
-    features = hooks.get_features()
-
-    print(f"preds shape: {preds.shape}")
-
-    # Sauvegarde HDF5
-    writer = HDF5Writer(HDF5_PATH)
-    writer.sauvegarder(features, subject, session, run, nb_stimuli)
+        writer = HDF5Writer(HDF5_PATH)
+        writer.sauvegarder(features, subject, session, run, stimulus_idx)
