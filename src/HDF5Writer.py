@@ -10,7 +10,7 @@ class HDF5Writer:
     """Sauvegarde les activations des couches TRIBE v2 dans un fichier HDF5.
 
     Structure du fichier :
-        subject/session/run/stimulus_N/encoder_layerX_attn -> array numpy
+        subject/session/run/encoder_layerX_attn -> array numpy
 
     Usage :
         writer = HDF5Writer("output/latents.h5")
@@ -27,7 +27,6 @@ class HDF5Writer:
         subject: str,
         session: str,
         run: str,
-        stimulus_idx: int,
     ) -> None:
         """Écrit les features dans le fichier HDF5 en mode append.
 
@@ -36,15 +35,14 @@ class HDF5Writer:
             subject: identifiant du sujet, ex. "sub-01"
             session: identifiant de la session, ex. "ses-001"
             run: nom du run, ex. "sub-01_ses-001_task-thingsmemory_run-1"
-            stimulus_idx: index du stimulus dans le run
         """
         with h5py.File(self.output_path, 'a') as hf:
             group = hf.require_group(
-                f"{subject}/{session}/{run}/stimulus_{stimulus_idx}"
+                f"{subject}/{session}/{run}"
             )
             for safe_name, array in features.items():
                 if safe_name in group:
                     del group[safe_name]
                 group.create_dataset(safe_name, data=array)
 
-        print(f"Sauvegardé : {subject}/{session}/{run}/stimulus_{stimulus_idx} → {self.output_path}")
+        print(f"Sauvegardé : {subject}/{session}/{run} → {self.output_path}")
