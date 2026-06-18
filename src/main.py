@@ -17,12 +17,12 @@ if __name__ == '__main__':
     logging.disable(logging.CRITICAL)
 
     config = Config(
-        plateforme="macos",
+        plateforme=None,
     )
     config.charger_env()
 
     ROOT = Path(__file__).parent.parent
-    DATA_DIR = ROOT / "data"
+    DATA_DIR = ROOT / "things-cfr"
     HDF5_PATH = ROOT / "output/hdf5/latents.h5"
 
     model = config.charger_modele()
@@ -48,8 +48,9 @@ if __name__ == '__main__':
             features = hooks.get_features()
 
             writer = HDF5Writer(HDF5_PATH)
-            writer.sauvegarder(features, subject, session, run, stimulus_idx=0)
+            writer.sauvegarder(features, subject, session, run)
 
             print(f"✓ {subject}/{session}/{run} - preds shape: {preds.shape}")
         except Exception as e:
             print(f"✗ {subject}/{session}/{run} - Erreur: {e}")
+
