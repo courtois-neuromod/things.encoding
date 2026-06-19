@@ -23,17 +23,22 @@ if __name__ == '__main__':
 
     ROOT = Path(__file__).parent.parent
     DATA_DIR = ROOT / "things-cfr"
-    HDF5_PATH = ROOT / "output/hdf5/latents.h5"
+    HDF5_DIR = ROOT / "output/hdf5/things_encoding"
 
     model = config.charger_modele()
     fmri_enc = model.__pydantic_private__['_model']
 
+    writer = HDF5Writer(HDF5_DIR)
     video_files = sorted(DATA_DIR.glob("**/sub-*_*_task-*.mp4"))
 
     for video_path in video_files:
         subject = video_path.parts[-3]  # "sub-XX"
         session = video_path.parts[-2]  # "ses-YYY"
         run = video_path.stem            # "sub-XX_ses-YYY_task-thingsmemory_run-Z"
+
+        if not subject.startswith("sub-") or not session.startswith("ses-"):
+            print(f"✗ Structure invalide : {video_path}")
+            continue
 
         try:
             events = model.get_events_dataframe(video_path=str(video_path))
@@ -47,7 +52,6 @@ if __name__ == '__main__':
             hooks.retirer()
             features = hooks.get_features()
 
-            writer = HDF5Writer(HDF5_PATH)
             writer.sauvegarder(features, subject, session, run)
 
             print(f"✓ {subject}/{session}/{run} - preds shape: {preds.shape}")
