@@ -29,15 +29,16 @@ if __name__ == '__main__':
     fmri_enc = model.__pydantic_private__['_model']
 
     writer = HDF5Writer(HDF5_DIR)
-    video_files = sorted(DATA_DIR.glob("**/sub-*_*_task-*.mp4"))
+    video_files = sorted(DATA_DIR.glob("sub-*_*_task-*.mp4"))
 
     for video_path in video_files:
-        subject = video_path.parts[-3]  # "sub-XX"
-        session = video_path.parts[-2]  # "ses-YYY"
-        run = video_path.stem            # "sub-XX_ses-YYY_task-thingsmemory_run-Z"
+        parts = video_path.stem.split("_")
+        subject = parts[0]
+        session = parts[1]
+        run = video_path.stem
 
         if not subject.startswith("sub-") or not session.startswith("ses-"):
-            print(f"✗ Structure invalide : {video_path}")
+            print(f"✗ Structure invalide : {video_path.name}")
             continue
 
         try:
