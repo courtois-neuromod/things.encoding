@@ -1,6 +1,6 @@
 """
 Gestion des forward hooks sur les couches Transformer de TRIBE v2.
-Capture les activations des couches attention du FmriEncoderModel
+Capture les activations des couches attention et feedforward du FmriEncoderModel
 pendant le forward pass de model.predict().
 """
 from collections import defaultdict
@@ -8,7 +8,7 @@ import torch
 
 
 class TransformerHooks:
-    """Attache des forward hooks sur les couches attention de FmriEncoderModel.
+    """Attache des forward hooks sur les couches attention et FFN de FmriEncoderModel.
 
     Usage :
         hooks = TransformerHooks(fmri_enc)
@@ -30,7 +30,7 @@ class TransformerHooks:
         return hook
 
     def attacher(self) -> int:
-        """Attache les hooks sur toutes les couches attention du Transformer.
+        """Attache les hooks sur toutes les couches attention et FFN du Transformer.
         Retourne le nombre de hooks enregistrés.
         """
         self.features.clear()
@@ -42,11 +42,10 @@ class TransformerHooks:
             submodule = layer_block[1]
             layer_type = 'attn' if i % 2 == 0 else 'ffn'
             transformer_layer_idx = i // 2
-            if layer_type == 'attn':
-                name = f'encoder.layer{transformer_layer_idx}.{layer_type}'
-                self._hooks.append(
-                    submodule.register_forward_hook(self._make_hook(name))
-                )
+            name = f'encoder.layer{transformer_layer_idx}.{layer_type}'
+            self._hooks.append(
+                submodule.register_forward_hook(self._make_hook(name))
+            )
 
         print(f"Hooks enregistrés : {len(self._hooks)}")
         return len(self._hooks)
