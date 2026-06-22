@@ -53,7 +53,7 @@ if __name__ == '__main__':
             hooks.retirer()
             features = hooks.get_features()
 
-            writer.sauvegarder(features, subject, session, run)
+            writer.sauvegarder(features, preds, subject, session, run)
 
             print(f"✓ {subject}/{session}/{run} - preds shape: {preds.shape}")
         except Exception as e:
