@@ -14,6 +14,10 @@ from HDF5Writer import HDF5Writer
 from TransformerHooks import TransformerHooks
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Extraction des latents TRIBE v2')
+    parser.add_argument('--subject', type=str, required=True, help='Identifiant du sujet à traiter')
+    args = parser.parse_args()
+
     warnings.filterwarnings("ignore")
     logging.disable(logging.CRITICAL)
 
@@ -30,18 +34,22 @@ if __name__ == '__main__':
     fmri_enc = model.__pydantic_private__['_model']
 
     writer = HDF5Writer(HDF5_DIR)
-    video_files = sorted(DATA_DIR.rglob("sub-*_*_task-*_desc-CFR.mp4"))
+    video_files = sorted(DATA_DIR.rglob("{args.subject}_*_task-*_desc-CFR.mp4"))
+    print(f"SUjet : {arg.subject} --> {len(video_files)} vidéos trouvées")
 
     for video_path in video_files:
         parts = video_path.stem.split("_")
         subject = parts[0]  # "sub-01"
         session = parts[1]  # "ses-001"
-
         run = next((p for p in parts if p.startswith("run-")), "run-unknown")
 
         if not subject.startswith("sub-") or not session.startswith("ses-"):
             print(f"✗ Structure invalide : {video_path.name}",flush=True)
             continue
+
+        outpout_path = HD5_DIR / f"{subject}.h5"
+        if outpout_path.exists():
+            with
 
         try:
             events = model.get_events_dataframe(video_path=str(video_path))
