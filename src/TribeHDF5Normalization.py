@@ -9,7 +9,7 @@ class TribeHDF5Normalization:
     def __init__(self, chemin_tribe, chemin_cneuromod, chemin_video,
                  tribe_ses, tribe_run, tribe_layer,
                  cneuromod_ses, cneuromod_dataset,
-                 t_Tribe_s, TR_irmf_s):
+                 t_Tribe_s, TR_irmf_s, delai_bold_s):
         """
         Initialise le normalisateur avec les chemins, les clés HDF5 et les constantes de temps.
         """
@@ -29,6 +29,7 @@ class TribeHDF5Normalization:
         # Constantes temporelles
         self.t_Tribe_s = t_Tribe_s
         self.TR_irmf_s = TR_irmf_s
+        self.delai_bold_s = delai_bold_s
 
         # Variables qui stockeront les matrices finales prêtes pour la Ridge
         self.X_aligne = None
@@ -71,12 +72,13 @@ class TribeHDF5Normalization:
             print(f"Dataset Tribe nettoyé du padding : {dataset_tribe_bonne_duree.shape}")
 
             # 4. Création des axes temporels
-            temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s + self.t_Tribe_s / 2
-            temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s / 2
+            temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s
+            temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s
+            temps_cible_avec_delai_bold = temps_cible - self.delai_bold_s
 
             # 5. Interpolation (L'alignement)
-            aligneur_temporel = interp1d(temps_source, dataset_tribe_bonne_duree, axis=0, fill_value="extrapolate")
-            self.X_aligne = aligneur_temporel(temps_cible)
+            aligneur_temporel = interp1d(temps_source, dataset_tribe_bonne_duree, axis=0, bounds_error=False, fill_value=0.0)
+            self.X_aligne = aligneur_temporel(temps_cible_avec_delai_bold)
 
             print(f"X (Tribe) : {self.X_aligne.shape} == Y (Cneuromod) : {self.Y_cible.shape}")
 
@@ -103,7 +105,8 @@ if __name__ == "__main__":
         cneuromod_ses='ses-01',
         cneuromod_dataset='ses-01_task-things_run-1_timeseries',
         t_Tribe_s=0.5,
-        TR_irmf_s=1.49
+        TR_irmf_s=1.49,
+        delai_bold_s=5,
     )
 
     # 3. Exécution du traitement
