@@ -58,7 +58,7 @@ class TribeHDF5Normalization:
             self.Y_cible = dataset_cneuromod
             print(f"Dataset Cneuromod (Y) : {self.Y_cible.shape}")
 
-            # 2. Extraction et Aplatissement Tribe avec clés dynamiques
+            # 2. Extraction et Aplatissement Tribe
             dataset_tribe = tribe_hdf5[self.tribe_ses][self.tribe_run][self.tribe_layer]
             print(f"Dataset Tribe origin : {dataset_tribe.shape}")
 
@@ -76,9 +76,17 @@ class TribeHDF5Normalization:
             temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s
             temps_cible_avec_delai_bold = temps_cible - self.delai_bold_s
 
+            # Gestion des zéros causé par le décalage Bold
+            masque_propre_sans_zero_debut = temps_cible_avec_delai_bold >= temps_source[0]
+            masque_propre_sans_zero_fin = temps_cible_avec_delai_bold <= temps_source[-1]
+            masque_propre_sans_zero = masque_propre_sans_zero_debut & masque_propre_sans_zero_fin
+
             # 5. Interpolation (L'alignement)
             aligneur_temporel = interp1d(temps_source, dataset_tribe_bonne_duree, axis=0, bounds_error=False, fill_value=0.0)
             self.X_aligne = aligneur_temporel(temps_cible_avec_delai_bold)
+
+            self.X_aligne = self.X_aligne[masque_propre_sans_zero]
+            self.Y_cible = self.Y_cible[masque_propre_sans_zero]
 
             print(f"X (Tribe) : {self.X_aligne.shape} == Y (Cneuromod) : {self.Y_cible.shape}")
 
@@ -88,9 +96,8 @@ class TribeHDF5Normalization:
 if __name__ == "__main__":
     # 1. Définition des chemins dynamiques
     ROOT = Path(__file__).parent.parent
-    DATA_DIR = ROOT / "data" / "things_mp4_cfr"
-
-    chemin_video = DATA_DIR / "sub-01_ses-001_task-thingsmemory_run-1_desc-CFR.mp4"
+    DATA_DIR = ROOT / "data"
+    chemin_video = DATA_DIR / "sub-01" / "ses-001" / "sub-01_ses-001_task-thingsmemory_run-1.mp4"
     chemin_tribe = ROOT / "output" / "hdf5" / "sub-01.h5"
     chemin_cneuromod = ROOT / "data" / "timeseries" / "cneuromod2026" / "sub-01" / "sub-01_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
 
