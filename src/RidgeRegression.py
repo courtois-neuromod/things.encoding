@@ -12,16 +12,18 @@ import h5py
 from sklearn.model_selection import LeaveOneGroupOut
 
 # Chemins
-ROOT = Path(__file__).parent.parent
-SUB = "sub-01"
+ROOT_ENCODING    = Path("/home/aclaud/links/scratch/things.encoding")
+ROOT_TIMESERIES  = Path("/home/aclaud/links/scratch/things.timeseries")
+
+SUB   = "sub-01"
 LAYER = "encoder_layer7_ffn"
 
-chemin_tribe = ROOT / "output" / "hdf5" / f"{SUB}.h5"
+chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{SUB}.h5"
+
 chemin_cneuromod = (
-    ROOT / "data" / "timeseries" / "cneuromod2026" / SUB /
+    ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / SUB /
     f"{SUB}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
 )
-
 # Découverte automatique des runs disponibles dans le HDF5 TRIBE
 runs = []
 with h5py.File(chemin_tribe, "r") as f:
@@ -38,7 +40,7 @@ with h5py.File(chemin_tribe, "r") as f:
 
             # Chemin vidéo originale (non CFR) pour ffprobe
             nom_video = f"{SUB}_{tribe_ses}_task-thingsmemory_{tribe_run}.mp4"
-            chemin_video = ROOT / "data" / SUB / tribe_ses / nom_video
+            chemin_video = ROOT_ENCODING / "data" / "data" / SUB / tribe_ses / nom_video
 
             runs.append((tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_dataset))
 

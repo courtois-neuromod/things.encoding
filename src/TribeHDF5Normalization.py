@@ -72,8 +72,8 @@ class TribeHDF5Normalization:
             print(f"Dataset Tribe nettoyé du padding : {dataset_tribe_bonne_duree.shape}")
 
             # 4. Création des axes temporels
-            temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s
-            temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s
+            temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s + self.t_Tribe_s/2
+            temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s/2
             temps_cible_avec_delai_bold = temps_cible - self.delai_bold_s
 
             # Gestion des zéros causé par le décalage Bold
