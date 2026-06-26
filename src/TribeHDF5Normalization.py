@@ -3,13 +3,15 @@ import h5py
 import subprocess
 import numpy as np
 from scipy.interpolate import interp1d
+from scipy.signal import convolve
+from nilearn.glm.first_level.hemodynamic_models import spm_hrf
 
 
 class TribeHDF5Normalization:
     def __init__(self, chemin_tribe, chemin_cneuromod, chemin_video,
                  tribe_ses, tribe_run, tribe_layer,
                  cneuromod_ses, cneuromod_dataset,
-                 t_Tribe_s, TR_irmf_s, delai_bold_s):
+                 t_Tribe_s, TR_irmf_s):
         """
         Initialise le normalisateur avec les chemins, les clés HDF5 et les constantes de temps.
         """
@@ -29,7 +31,6 @@ class TribeHDF5Normalization:
         # Constantes temporelles
         self.t_Tribe_s = t_Tribe_s
         self.TR_irmf_s = TR_irmf_s
-        self.delai_bold_s = delai_bold_s
 
         # Variables qui stockeront les matrices finales prêtes pour la Ridge
         self.X_aligne = None
@@ -71,22 +72,28 @@ class TribeHDF5Normalization:
             dataset_tribe_bonne_duree = dataset_tribe_concatene[:nb_instants_valides, :]
             print(f"Dataset Tribe nettoyé du padding : {dataset_tribe_bonne_duree.shape}")
 
-            # 4. Création des axes temporels
-            temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s + self.t_Tribe_s/2
-            temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s/2
-            temps_cible_avec_delai_bold = temps_cible - self.delai_bold_s
+            # Création d'un signal hemodynamique de 30s
+            noyau_hrf = spm_hrf(t_r=self.t_Tribe_s)
+            # Reshape pour avoir le même nombre de dimensions que dataset_tribe
+            noyau_hrf = noyau_hrf.reshape(-1, 1)
 
-            # Gestion des zéros causé par le décalage Bold
-            masque_propre_sans_zero_debut = temps_cible_avec_delai_bold >= temps_source[0]
-            masque_propre_sans_zero_fin = temps_cible_avec_delai_bold <= temps_source[-1]
-            masque_propre_sans_zero = masque_propre_sans_zero_debut & masque_propre_sans_zero_fin
+            dataset_tribe_convolue = convolve(dataset_tribe_bonne_duree, noyau_hrf, mode='full')
+            dataset_tribe_convolue = dataset_tribe_convolue[:nb_instants_valides, :]
+
+            # 4. Création des axes temporels
+            temps_source = np.arange(dataset_tribe_convolue.shape[0]) * self.t_Tribe_s + self.t_Tribe_s/2
+            temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s/2
+
+            masque_debut = temps_cible >= temps_source[0]
+            masque_fin = temps_cible <= temps_source[-1]
+            masque_valide = masque_debut & masque_fin
 
             # 5. Interpolation (L'alignement)
-            aligneur_temporel = interp1d(temps_source, dataset_tribe_bonne_duree, axis=0, bounds_error=False, fill_value=0.0)
-            self.X_aligne = aligneur_temporel(temps_cible_avec_delai_bold)
+            aligneur_temporel = interp1d(temps_source, dataset_tribe_convolue, axis=0, bounds_error=False, fill_value=0.0)
+            self.X_aligne = aligneur_temporel(temps_cible)
 
-            self.X_aligne = self.X_aligne[masque_propre_sans_zero]
-            self.Y_cible = self.Y_cible[masque_propre_sans_zero]
+            self.X_aligne = self.X_aligne[masque_valide]
+            self.Y_cible = self.Y_cible[masque_valide]
 
             print(f"X (Tribe) : {self.X_aligne.shape} == Y (Cneuromod) : {self.Y_cible.shape}")
 
@@ -113,7 +120,6 @@ if __name__ == "__main__":
         cneuromod_dataset='ses-01_task-things_run-1_timeseries',
         t_Tribe_s=0.5,
         TR_irmf_s=1.49,
-        delai_bold_s=5,
     )
 
     # 3. Exécution du traitement

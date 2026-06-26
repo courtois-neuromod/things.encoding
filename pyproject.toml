@@ -23,6 +23,7 @@ dependencies = [
     "torchcodec==0.1.0",
     "torchaudio>=2.11.0",
     "scipy>=1.17.1",
+    "nilearn>=0.13.1",
 ]
 
 [tool.hatch.metadata]
