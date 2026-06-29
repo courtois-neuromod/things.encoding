@@ -12,6 +12,8 @@ import h5py
 from sklearn.model_selection import LeaveOneGroupOut
 
 # Chemins
+"""
+#Rorqual
 ROOT_ENCODING    = Path("/home/aclaud/links/scratch/things.encoding")
 ROOT_TIMESERIES  = Path("/home/aclaud/links/scratch/things.timeseries")
 
@@ -24,6 +26,20 @@ chemin_cneuromod = (
     ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / SUB /
     f"{SUB}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
 )
+"""
+
+ROOT = Path(__file__).parent.parent
+
+SUB   = "sub-01"
+LAYER = "encoder_layer7_ffn"
+
+chemin_tribe = ROOT / "output" / "hdf5" / "sub-01.h5"
+
+chemin_cneuromod = (
+    ROOT / "data" / "timeseries" / "cneuromod2026" / SUB /
+    f"{SUB}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
+)
+
 # Découverte automatique des runs disponibles dans le HDF5 TRIBE
 runs = []
 with h5py.File(chemin_tribe, "r") as f:
@@ -40,7 +56,9 @@ with h5py.File(chemin_tribe, "r") as f:
 
             # Chemin vidéo originale (non CFR) pour ffprobe
             nom_video = f"{SUB}_{tribe_ses}_task-thingsmemory_{tribe_run}.mp4"
-            chemin_video = ROOT_ENCODING / "data" / "data" / SUB / tribe_ses / nom_video
+            #Rorqual
+            #chemin_video = ROOT_ENCODING / "data" / "data" / SUB / tribe_ses / nom_video
+            chemin_video = ROOT / "data" / SUB / tribe_ses / nom_video
 
             runs.append((tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_dataset))
 
@@ -69,7 +87,6 @@ for id_run, (tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_datase
             cneuromod_dataset=cneuromod_dataset,
             t_Tribe_s=0.5,
             TR_irmf_s=1.49,
-            delai_bold_s=5,
         )
         X_run, Y_run = normalisateur.executer_pipeline()
         X_list.append(X_run)
@@ -88,6 +105,58 @@ Y = np.concatenate(Y_list, axis=0)
 groupes = np.concatenate(groupes_list, axis=0)
 print(f"Matrice finale : X={X.shape}, Y={Y.shape}")
 
+session_par_run = {}
+for id_run, label in enumerate(runs_ok):
+    ses = label.split("/")[0]  # "ses-001"
+    session_par_run[id_run] = ses
+
+sessions_uniques = sorted(set(session_par_run.values()))
+
+# --- PARAMÈTRES ML ---
+alphas = np.logspace(-1, 5, 20)
+scores_tous_les_folds = []
+
+print(f"\n{len(sessions_uniques)} sessions")
+
+for ses in sessions_uniques:
+    # Trouver les ids de runs appartenant à cette session
+    ids_session = [i for i, s in session_par_run.items() if s == ses]
+
+    if len(ids_session) < 2:
+        print(f"\n{ses} : pas assez de runs ({len(ids_session)}), ignorée")
+        continue
+
+    # Train = tous les runs sauf le dernier, Test = dernier run
+    ids_train = ids_session[:-1]
+    ids_test  = ids_session[-1:]
+
+    train_mask = np.isin(groupes, ids_train)
+    test_mask  = np.isin(groupes, ids_test)
+
+    X_train, Y_train = X[train_mask], Y[train_mask]
+    X_test,  Y_test  = X[test_mask],  Y[test_mask]
+
+    print(f"\n--- Session {ses} | Train : {X_train.shape[0]} TRs ({len(ids_train)} runs) | Test : {X_test.shape[0]} TRs (1 run) ---")
+
+    # Standardisation
+    scaler_X = StandardScaler()
+    scaler_Y = StandardScaler()
+    X_train_scaled = scaler_X.fit_transform(X_train)
+    Y_train_scaled = scaler_Y.fit_transform(Y_train)
+    X_test_scaled  = scaler_X.transform(X_test)
+    Y_test_scaled  = scaler_Y.transform(Y_test)
+
+    # RidgeCV
+    modele = RidgeCV(alphas=alphas, alpha_per_target=True)
+    modele.fit(X_train_scaled, Y_train_scaled)
+
+    # Score
+    Y_pred_scaled = modele.predict(X_test_scaled)
+    scores_r2 = r2_score(Y_test_scaled, Y_pred_scaled, multioutput="raw_values")
+    scores_tous_les_folds.append(scores_r2)
+    print(f"    -> R² max : {np.max(scores_r2):.4f}")
+
+"""
 # --- PARAMÈTRES ML ---
 alphas = np.logspace(-1, 5, 20)
 logo = LeaveOneGroupOut()
@@ -122,9 +191,8 @@ for index_fold, (train_index, test_index) in enumerate(logo.split(X, Y, groupes)
 
     scores_tous_les_folds.append(scores_r2)
     print(f"    -> R² max sur ce fold : {np.max(scores_r2):.4f}")
-
+"""
 # --- RÉSULTATS GLOBAUX ---
-# On fait la moyenne des matrices de scores (1134 parcelles) sur tous les folds
 scores_finaux = np.mean(scores_tous_les_folds, axis=0)
 
 score_moyen = np.mean(scores_finaux)
