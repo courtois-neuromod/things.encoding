@@ -11,7 +11,7 @@ class TribeHDF5Normalization:
     def __init__(self, chemin_tribe, chemin_cneuromod, chemin_video,
                  tribe_ses, tribe_run, tribe_layer,
                  cneuromod_ses, cneuromod_dataset,
-                 t_Tribe_s, TR_irmf_s):
+                 t_Tribe_s, TR_irmf_s, flag_delai_bold_brute, centrage_donne_temps):
         """
         Initialise le normalisateur avec les chemins, les clés HDF5 et les constantes de temps.
         """
@@ -35,6 +35,9 @@ class TribeHDF5Normalization:
         # Variables qui stockeront les matrices finales prêtes pour la Ridge
         self.X_aligne = None
         self.Y_cible = None
+
+        self.flag_delai_bold_brute = flag_delai_bold_brute
+        self.centrage_donne_temps = centrage_donne_temps
 
     def _obtenir_duree_video(self):
         """Méthode privée pour extraire la durée via ffprobe."""
@@ -72,24 +75,36 @@ class TribeHDF5Normalization:
             dataset_tribe_bonne_duree = dataset_tribe_concatene[:nb_instants_valides, :]
             print(f"Dataset Tribe nettoyé du padding : {dataset_tribe_bonne_duree.shape}")
 
-            # Création d'un signal hemodynamique de 30s
-            noyau_hrf = spm_hrf(t_r=self.t_Tribe_s)
-            # Reshape pour avoir le même nombre de dimensions que dataset_tribe
-            noyau_hrf = noyau_hrf.reshape(-1, 1)
+            if self.flag_delai_bold_brute == True:
+                if self.centrage_donne_temps == True:
+                    temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s + self.t_Tribe_s / 2
+                    temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s / 2
+                    temps_cible_avec_delai_bold = temps_cible - self.delai_bold_s
+                else:
+                    temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s
+                    temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s
+                    temps_cible = temps_cible - 5
 
-            dataset_tribe_convolue = convolve(dataset_tribe_bonne_duree, noyau_hrf, mode='full')
-            dataset_tribe_convolue = dataset_tribe_convolue[:nb_instants_valides, :]
+                dataset_tribe_propre = dataset_tribe_bonne_duree
+            else:
+                #Création d'un signal hemodynamique de 30s
+                noyau_hrf = spm_hrf(t_r=self.t_Tribe_s)
+                # Reshape pour avoir le même nombre de dimensions que dataset_tribe
+                noyau_hrf = noyau_hrf.reshape(-1, 1)
 
-            # 4. Création des axes temporels
-            temps_source = np.arange(dataset_tribe_convolue.shape[0]) * self.t_Tribe_s + self.t_Tribe_s/2
-            temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s/2
+                dataset_tribe_propre = convolve(dataset_tribe_bonne_duree, noyau_hrf, mode='full')
+                dataset_tribe_propre = dataset_tribe_propre[:nb_instants_valides, :]
+
+                # 4. Création des axes temporels
+                temps_source = np.arange(dataset_tribe_propre.shape[0]) * self.t_Tribe_s + self.t_Tribe_s/2
+                temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s/2
 
             masque_debut = temps_cible >= temps_source[0]
             masque_fin = temps_cible <= temps_source[-1]
             masque_valide = masque_debut & masque_fin
 
             # 5. Interpolation (L'alignement)
-            aligneur_temporel = interp1d(temps_source, dataset_tribe_convolue, axis=0, bounds_error=False, fill_value=0.0)
+            aligneur_temporel = interp1d(temps_source, dataset_tribe_propre, axis=0, bounds_error=False, fill_value=0.0)
             self.X_aligne = aligneur_temporel(temps_cible)
 
             self.X_aligne = self.X_aligne[masque_valide]
@@ -120,6 +135,8 @@ if __name__ == "__main__":
         cneuromod_dataset='ses-01_task-things_run-1_timeseries',
         t_Tribe_s=0.5,
         TR_irmf_s=1.49,
+        flag_delai_bold_brute = True,
+        centrage_donne_temps = False,
     )
 
     # 3. Exécution du traitement
