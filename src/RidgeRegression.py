@@ -10,17 +10,18 @@ from sklearn.metrics import r2_score
 import numpy as np
 import h5py
 from sklearn.model_selection import LeaveOneGroupOut
+from sklearn.decomposition import PCA
 
 # Chemins
 plateforme = ["Roquale", "Mac"]
 plateforme = plateforme[1]
 
+SUB = "sub-03"
+LAYER = "encoder_layer7_ffn"
+
 if plateforme == "Roquale":
     ROOT_ENCODING    = Path("/home/aclaud/links/scratch/things.encoding")
     ROOT_TIMESERIES  = Path("/home/aclaud/links/scratch/things.timeseries")
-
-    SUB   = "sub-01"
-    LAYER = "encoder_layer7_ffn"
 
     chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{SUB}.h5"
 
@@ -30,9 +31,6 @@ if plateforme == "Roquale":
     )
 else:
     ROOT = Path(__file__).parent.parent
-
-    SUB   = "sub-01"
-    LAYER = "encoder_layer7_ffn"
 
     chemin_tribe = ROOT / "output" / "hdf5" / "sub-01.h5"
 
@@ -115,8 +113,10 @@ logo = LeaveOneGroupOut()
 scores_tous_les_folds = []
 
 print(f"\n[Validation Croisée] Lancement du LORO-CV sur {len(runs_ok)} runs...")
-
-# Séparation automatique des runs pour le test, et le reste pour le train
+train_index, test_index = next(logo.split(X, Y, groupes))
+print(f"Train: {len(train_index)} TRs, Test: {len(test_index)} TRs")
+#print(f"Groupe de test : {groupes[test_index][0]}")
+# Séparation automatique d'un runs pour le test, et de tout le reste pour le train
 for index_fold, (train_index, test_index) in enumerate(logo.split(X, Y, groupes)):
     print(f"\n--- Évaluation du Fold {index_fold + 1}/{len(runs_ok)} ---")
 
@@ -133,12 +133,26 @@ for index_fold, (train_index, test_index) in enumerate(logo.split(X, Y, groupes)
     X_test_scaled = scaler_X.transform(X_test)
     Y_test_scaled = scaler_Y.transform(Y_test)
 
+    #PCA
+    pca = PCA(n_components=0.95)  # garde 95% de la variance
+    X_train_reduit = pca.fit_transform(X_train_scaled)
+    X_test_reduit = pca.transform(X_test_scaled)
+
     # 3. Entraînement RidgeCV
+    # Sans PCA
+    # modele = RidgeCV(alphas=alphas, alpha_per_target=True)
+    # modele.fit(X_train_scaled, Y_train_scaled)
+
+    # Avec PCA
     modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-    modele.fit(X_train_scaled, Y_train_scaled)
+    modele.fit(X_train_reduit, Y_train_scaled)
 
     # 4. Prédiction et Score de ce Fold
-    Y_pred_scaled = modele.predict(X_test_scaled)
+    # Sans PCA
+    # Y_pred_scaled = modele.predict(X_test_scaled)
+
+    # Avec PCA
+    Y_pred_scaled = modele.predict(X_test_reduit)
     scores_r2 = r2_score(Y_test_scaled, Y_pred_scaled, multioutput="raw_values")
 
     scores_tous_les_folds.append(scores_r2)

@@ -79,7 +79,7 @@ class TribeHDF5Normalization:
                 if self.centrage_donne_temps == True:
                     temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s + self.t_Tribe_s / 2
                     temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s / 2
-                    temps_cible_avec_delai_bold = temps_cible - self.delai_bold_s
+                    temps_cible_avec_delai_bold = temps_cible - 5
                 else:
                     temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s
                     temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s
