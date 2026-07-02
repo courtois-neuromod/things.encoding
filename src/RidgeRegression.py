@@ -14,7 +14,7 @@ from sklearn.decomposition import PCA
 
 # Chemins
 plateforme = ["Roquale", "Mac"]
-plateforme = plateforme[1]
+plateforme = plateforme[0]
 
 SUB = "sub-03"
 LAYER = "encoder_layer7_ffn"
@@ -88,7 +88,7 @@ for id_run, (tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_datase
             t_Tribe_s=0.5,
             TR_irmf_s=1.49,
             flag_delai_bold_brute=True,
-            centrage_donne_temps=False,
+            centrage_donne_temps=True,
         )
         X_run, Y_run = normalisateur.executer_pipeline()
         X_list.append(X_run)
@@ -134,25 +134,26 @@ for index_fold, (train_index, test_index) in enumerate(logo.split(X, Y, groupes)
     Y_test_scaled = scaler_Y.transform(Y_test)
 
     #PCA
-    pca = PCA(n_components=0.95)  # garde 95% de la variance
-    X_train_reduit = pca.fit_transform(X_train_scaled)
-    X_test_reduit = pca.transform(X_test_scaled)
+    #pca = PCA(n_components=0.95)  # garde 95% de la variance
+    #X_train_reduit = pca.fit_transform(X_train_scaled)
+    #X_test_reduit = pca.transform(X_test_scaled)
 
     # 3. Entraînement RidgeCV
     # Sans PCA
-    # modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-    # modele.fit(X_train_scaled, Y_train_scaled)
+    modele = RidgeCV(alphas=alphas, alpha_per_target=True)
+    modele.fit(X_train_scaled, Y_train_scaled)
 
     # Avec PCA
-    modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-    modele.fit(X_train_reduit, Y_train_scaled)
+    #modele = RidgeCV(alphas=alphas, alpha_per_target=True)
+    #modele.fit(X_train_reduit, Y_train_scaled)
 
     # 4. Prédiction et Score de ce Fold
     # Sans PCA
-    # Y_pred_scaled = modele.predict(X_test_scaled)
+    Y_pred_scaled = modele.predict(X_test_scaled)
 
     # Avec PCA
-    Y_pred_scaled = modele.predict(X_test_reduit)
+    #Y_pred_scaled = modele.predict(X_test_reduit)
+
     scores_r2 = r2_score(Y_test_scaled, Y_pred_scaled, multioutput="raw_values")
 
     scores_tous_les_folds.append(scores_r2)
