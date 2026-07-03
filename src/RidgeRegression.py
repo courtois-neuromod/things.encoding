@@ -12,6 +12,10 @@ import h5py
 import gc
 from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.decomposition import PCA
+from nilearn.maskers import NiftiLabelsMasker
+from nilearn.plotting import plot_stat_map, show
+import matplotlib
+matplotlib.use('Agg')
 
 class RidgeRegression:
 
@@ -33,15 +37,20 @@ class RidgeRegression:
                     ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject /
                     f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
             )
-            return ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod
+
+            chemin_atlas = (
+                    ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject /
+                    f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
+            )
+            return ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas
         else:
             ROOT = Path(__file__).parent.parent
 
-            chemin_tribe = ROOT / "output" / "hdf5" / f"{SUB}.h5"
+            chemin_tribe = ROOT / "output" / "hdf5" / f"{self.subject}.h5"
 
             chemin_cneuromod = (
-                    ROOT / "data" / "timeseries" / "cneuromod2026" / SUB /
-                    f"{SUB}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
+                    ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
+                    f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
             )
             return ROOT, chemin_tribe, chemin_cneuromod
 
@@ -69,11 +78,11 @@ class RidgeRegression:
                     cneuromod_dataset = f"{cneuromod_ses}_task-things_run-{num_run}_timeseries"
 
                     # Chemin vidéo originale (non CFR) pour ffprobe
-                    nom_video = f"{SUB}_{tribe_ses}_task-thingsmemory_{tribe_run}.mp4"
+                    nom_video = f"{self.subject}_{tribe_ses}_task-thingsmemory_{tribe_run}.mp4"
                     if self.plateforme == "Roquale":
-                        chemin_video = ROOT_ENCODING / "data" / "data" / SUB / tribe_ses / nom_video
+                        chemin_video = ROOT_ENCODING / "data" / "data" / self.subject / tribe_ses / nom_video
                     else :
-                        chemin_video = ROOT / "data" / SUB / tribe_ses / nom_video
+                        chemin_video = ROOT / "data" / self.subject / tribe_ses / nom_video
 
                     runs.append((tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_dataset))
 
@@ -268,5 +277,29 @@ if __name__ == "__main__":
     PCA_flag = False
 
     ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps)
-    ridge.print_scores(mode, type, alphas, PCA_flag)
+    scores_r2 = ridge.cross_validation(mode, type, alphas, PCA_flag)
+
+    if scores_r2 is not None:
+        # Chemin vers ton atlas correspondant (le même que dans ton pipeline)
+        _,_,_,_,atlas_path = ridge.get_path_file_by_plateform(plateforme)
+
+        # Création du masker
+        atlas_masker = NiftiLabelsMasker(labels_img=atlas_path, standardize=False)
+        atlas_masker.fit()
+
+        # Projection 1D -> 3D
+        r2_map_3d = atlas_masker.inverse_transform(scores_r2)
+
+        # Plot
+        display = plot_stat_map(
+            r2_map_3d,
+            threshold=0.01,  # Filtre les résultats non significatifs
+            display_mode='mosaic',
+            title=f'R² Map pour {SUB} - {LAYER}',
+            colorbar=True,
+            cmap='hot',
+        )
+        display.savefig(f"../output/brain_map_{SUB}_{LAYER}.png", dpi=150)
+        display.close()
+        print(f"Carte cérébrale sauvegardée : brain_map_{SUB}_{LAYER}.png")
 
