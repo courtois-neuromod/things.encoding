@@ -302,7 +302,7 @@ if __name__ == "__main__":
     centrage_donne_temps = False
 
     mode = "train"
-    cv_type = "LeaveOneGroupOut"
+    cv_type = "CustomHoldOut"
     PCA_flag = False
 
     ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps)
@@ -335,6 +335,6 @@ if __name__ == "__main__":
             colorbar=True,
             cmap='YlOrRd',
         )
-        display.savefig(f"../output/brain_map_{SUB}_{LAYER}_2.png", dpi=300)
+        display.savefig(f"../output/brain_map_{SUB}_{LAYER}_3.png", dpi=300)
         display.close()
         print(f"Carte cérébrale sauvegardée : brain_map_{SUB}_{LAYER}.png")
