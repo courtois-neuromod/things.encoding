@@ -13,7 +13,7 @@ import gc
 from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.decomposition import PCA
 from nilearn.maskers import NiftiLabelsMasker
-from nilearn.plotting import plot_stat_map, show
+from nilearn.plotting import plot_stat_map
 import matplotlib
 matplotlib.use('Agg')
 
@@ -125,8 +125,8 @@ class RidgeRegression:
                 cneuromod_dataset=cneuromod_dataset,
                 t_Tribe_s=0.5,
                 TR_irmf_s=1.49,
-                flag_delai_bold_brute=True,
-                centrage_donne_temps=False,
+                flag_delai_bold_brute=self.flag_delai_bold_brute,
+                centrage_donne_temps=self.centrage_donne_temps,
             )
             X_run, Y_run = normalisateur.executer_pipeline()
             X_list.append(X_run)
@@ -167,7 +167,8 @@ class RidgeRegression:
                 print(f"      [PCA] Dimensions réduites de {X_train.shape[1]} à {X_train_reduit.shape[1]}")
 
             modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-            modele.fit(X_train_reduit, Y_train_scaled)
+            modele.fit(X_train_reduit, Y_train)
+            #modele.fit(X_train_reduit, Y_train_scaled)
 
             Y_pred_scaled = modele.predict(X_test_reduit)
         else:
@@ -185,9 +186,9 @@ class RidgeRegression:
         return scores_r2
 
 
-    def cross_validation(self, mode, type, alphas, PCA_flag):
+    def cross_validation(self, mode, cv_type, alphas, PCA_flag):
         if mode == "train":
-            if type == "LeaveOneGroupOut":
+            if cv_type == "LeaveOneGroupOut":
                 logo = LeaveOneGroupOut()
                 runs_ok, X, Y, groupes = self.prepare_X_and_Y()
 
@@ -198,8 +199,9 @@ class RidgeRegression:
                 print(f"\n[Validation Croisée] Lancement sur {len(np.unique(groupes))} sessions (Test sur 1 session par fold)...")
 
                 scores_tous_les_folds = []
+                n_folds = len(np.unique(groupes))
                 for index_fold, (train_index, test_index) in enumerate(logo.split(X, Y, groupes)):
-                    print(f"\n--- Évaluation du Fold {index_fold + 1}/{len(runs_ok)} ---")
+                    print(f"\n--- Évaluation du Fold {index_fold + 1}/{n_folds} ---")
 
                     X_train, X_test = X[train_index], X[test_index]
                     Y_train, Y_test = Y[train_index], Y[test_index]
@@ -215,7 +217,7 @@ class RidgeRegression:
 
                 return scores_finaux
 
-            elif type == "CustomHoldout":
+            elif cv_type == "CustomHoldout":
                 runs_ok, X, Y, groupes = self.prepare_X_and_Y()
 
                 if len(X) == 0 or len(Y) == 0:
@@ -246,8 +248,7 @@ class RidgeRegression:
 
 
 
-    def print_scores(self, mode, type, alphas, PCA_flag):
-        scores_finaux =  self.cross_validation(mode, type, alphas, PCA_flag)
+    def print_scores(self, scores_finaux):
         score_moyen = np.mean(scores_finaux)
         score_median = np.median(scores_finaux)
         score_max = np.max(scores_finaux)
@@ -266,7 +267,6 @@ if __name__ == "__main__":
 
     # --- PARAMÈTRES ML ---
     alphas = np.logspace(-1, 20, 20)
-    logo = LeaveOneGroupOut()
 
     # Chemins
     plateforme = ["Roquale", "Mac"]
@@ -279,15 +279,16 @@ if __name__ == "__main__":
     centrage_donne_temps = False
 
     mode = "train"
-    type = "LeaveOneGroupOut"
+    cv_type = "LeaveOneGroupOut"
     PCA_flag = False
 
     ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps)
-    ridge.print_scores(mode, type, alphas, PCA_flag)
-    
-    scores_r2 = ridge.cross_validation(mode, type, alphas, PCA_flag)
+
+    scores_r2 = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
 
     if scores_r2 is not None:
+        ridge.print_scores(scores_r2)
+
         # Chemin vers ton atlas correspondant (le même que dans ton pipeline)
         _,_,_,_,atlas_path = ridge.get_path_file_by_plateform(plateforme)
 
@@ -302,10 +303,13 @@ if __name__ == "__main__":
         display = plot_stat_map(
             r2_map_3d,
             threshold=0.01,  # Filtre les résultats non significatifs
+            vmin=0,
+            vmax=np.max(scores_r2),
+            symmetric_cbar=False,
             display_mode='mosaic',
             title=f'R² Map pour {SUB} - {LAYER}',
             colorbar=True,
-            cmap='coolwarm',
+            cmap='YlOrRd',
         )
         display.savefig(f"../output/brain_map_{SUB}_{LAYER}_2.png", dpi=300)
         display.close()
