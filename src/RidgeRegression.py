@@ -8,6 +8,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import r2_score
 import numpy as np
+import pandas as pd
 import h5py
 import gc
 from sklearn.model_selection import LeaveOneGroupOut
@@ -58,6 +59,23 @@ class RidgeRegression:
                     f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
             )
             return ROOT, chemin_tribe, chemin_cneuromod, chemin_atlas
+
+    def get_chemin_annotations_parcelles(self, plateforme):
+        nom_fichier_annotations = (
+            "tpl-MNI152NLin2009cAsym_atlas-Schaefer2018TianS3NettekovenAsym_"
+            "desc-1000Parcels7Networks50Subcort128Cereb_parcelAnnotations.tsv"
+        )
+        if plateforme == "Roquale":
+            ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
+            return ROOT_ENCODING / "data" / "brain_map_subj" / nom_fichier_annotations
+        else:
+            ROOT = Path(__file__).parent.parent
+            return ROOT / "data" / "brain_map_subj" / nom_fichier_annotations
+
+    def charger_noms_parcelles(self, plateforme):
+        chemin_annotations = self.get_chemin_annotations_parcelles(plateforme)
+        annotations = pd.read_csv(chemin_annotations, sep="\t")
+        return annotations["name"].tolist()
 
     def discover_runs(self):
         if self.plateforme == "Roquale":
@@ -248,18 +266,23 @@ class RidgeRegression:
 
 
 
-    def print_scores(self, scores_finaux):
+    def print_scores(self, scores_finaux, noms_parcelles=None):
         score_moyen = np.mean(scores_finaux)
         score_median = np.median(scores_finaux)
         score_max = np.max(scores_finaux)
         parcelle_max = np.argmax(scores_finaux)
         n_positifs = np.sum(scores_finaux > 0)
 
+        if noms_parcelles is not None:
+            nom_parcelle_max = noms_parcelles[parcelle_max]
+        else:
+            nom_parcelle_max = parcelle_max
+
         print(f"\n=========================================")
         print(f"[Résultats Finaux Robustes — couche {self.layer}]")
         print(f"R² moyen   : {score_moyen:.4f}")
         print(f"R² médian  : {score_median:.4f}")
-        print(f"R² max     : {score_max:.4f}  (parcelle {parcelle_max})")
+        print(f"R² max     : {score_max:.4f}  (parcelle {nom_parcelle_max})")
         print(f"Parcelles R² > 0 : {n_positifs} / {len(scores_finaux)}")
         print(f"=========================================")
 
@@ -287,7 +310,8 @@ if __name__ == "__main__":
     scores_r2 = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
 
     if scores_r2 is not None:
-        ridge.print_scores(scores_r2)
+        noms_parcelles = ridge.charger_noms_parcelles(plateforme)
+        ridge.print_scores(scores_r2, noms_parcelles)
 
         # Chemin vers ton atlas correspondant (le même que dans ton pipeline)
         _,_,_,_,atlas_path = ridge.get_path_file_by_plateform(plateforme)
