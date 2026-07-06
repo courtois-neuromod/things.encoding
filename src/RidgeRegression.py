@@ -13,52 +13,87 @@ import h5py
 import gc
 from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.decomposition import PCA
-from nilearn.maskers import NiftiLabelsMasker
+from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
 from nilearn.plotting import plot_stat_map
 import matplotlib
 matplotlib.use('Agg')
 
 class RidgeRegression:
 
-    def __init__(self, plateforme, subject, layer,  flag_delai_bold_brute, centrage_donne_temps):
+    def __init__(self, plateforme, subject, layer,  flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel):
         self.plateforme = plateforme
         self.subject = subject
         self.layer = layer
         self.flag_delai_bold_brute = flag_delai_bold_brute
         self.centrage_donne_temps = centrage_donne_temps
+        self.flag_precision_voxel = flag_precision_voxel
 
     def get_path_file_by_plateform(self, plateforme):
-        if plateforme == "Roquale":
-            ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
-            ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
+        if self.flag_precision_voxel:
+            if plateforme == "Roquale":
+                ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
+                ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
 
-            chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
+                chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
 
-            chemin_cneuromod = (
-                    ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject /
-                    f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
-            )
+                chemin_cneuromod = (
+                        ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject /
+                        f"{self.subject}_task-things_space-T1w_desc-voxelwise_timeseries.h5"
+                )
 
-            chemin_atlas = (
-                    ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject /
-                    f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
-            )
-            return ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas
+                chemin_atlas = (
+                        ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject /
+                        f"{self.subject}_task-things_space-T1w_label-GMfromFS_desc-indivFunc_mask.nii.gz"
+                )
+
+                return ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas
+            else:
+                ROOT = Path(__file__).parent.parent
+
+                chemin_tribe = ROOT / "output" / "hdf5" / f"{self.subject}.h5"
+
+                chemin_cneuromod = (
+                        ROOT / "timeseries" / "voxel_native" / self.subject /
+                        f"{self.subject}_task-things_space-T1w_desc-voxelwise_timeseries.h5"
+                )
+
+                chemin_atlas = (
+                        ROOT / "timeseries" / "voxel_native" / self.subject /
+                        f"{self.subject}_task-things_space-T1w_label-GMfromFS_desc-indivFunc_mask.nii.gz"
+                )
+                return ROOT, chemin_tribe, chemin_cneuromod, chemin_atlas
         else:
-            ROOT = Path(__file__).parent.parent
+            if plateforme == "Roquale":
+                ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
+                ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
 
-            chemin_tribe = ROOT / "output" / "hdf5" / f"{self.subject}.h5"
+                chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
 
-            chemin_cneuromod = (
-                    ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
-                    f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
-            )
+                chemin_cneuromod = (
+                        ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject /
+                        f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
+                )
 
-            chemin_atlas = (
-                    ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
-                    f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
-            )
-            return ROOT, chemin_tribe, chemin_cneuromod, chemin_atlas
+                chemin_atlas = (
+                        ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject /
+                        f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
+                )
+                return ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas
+            else:
+                ROOT = Path(__file__).parent.parent
+
+                chemin_tribe = ROOT / "output" / "hdf5" / f"{self.subject}.h5"
+
+                chemin_cneuromod = (
+                        ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
+                        f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
+                )
+
+                chemin_atlas = (
+                        ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
+                        f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
+                )
+                return ROOT, chemin_tribe, chemin_cneuromod, chemin_atlas
 
     def get_chemin_annotations_parcelles(self, plateforme):
         nom_fichier_annotations = (
@@ -272,19 +307,79 @@ class RidgeRegression:
         score_max = np.max(scores_finaux)
         parcelle_max = np.argmax(scores_finaux)
         n_positifs = np.sum(scores_finaux > 0)
+        if self.flag_precision_voxel == False:
+            if noms_parcelles is not None:
+                nom_parcelle_max = noms_parcelles[parcelle_max]
+            else:
+                nom_parcelle_max = parcelle_max
 
-        if noms_parcelles is not None:
-            nom_parcelle_max = noms_parcelles[parcelle_max]
+            print(f"\n=========================================")
+            print(f"[Résultats Finaux Robustes — couche {self.layer}]")
+            print(f"R² moyen   : {score_moyen:.4f}")
+            print(f"R² médian  : {score_median:.4f}")
+            print(f"R² max     : {score_max:.4f}  (parcelle {nom_parcelle_max})")
+            print(f"Parcelles R² > 0 : {n_positifs} / {len(scores_finaux)}")
+            print(f"=========================================")
+        else :
+            print(f"\n=========================================")
+            print(f"[Résultats Finaux Robustes — couche {self.layer}]")
+            print(f"R² moyen   : {score_moyen:.4f}")
+            print(f"R² médian  : {score_median:.4f}")
+            print(f"R² max     : {score_max:.4f}  (parcelle {parcelle_max})")
+            print(f"Parcelles R² > 0 : {n_positifs} / {len(scores_finaux)}")
+            print(f"=========================================")
+
+    def brain_mapping(self, scores_r2):
+        if self.flag_precision_voxel == False:
+            noms_parcelles = self.charger_noms_parcelles(self.plateforme)
+            self.print_scores(scores_r2, noms_parcelles)
+
+            _, _, _, _, atlas_path = self.get_path_file_by_plateform(self.plateforme)
+
+            atlas_masker = NiftiLabelsMasker(labels_img=atlas_path, standardize=False)
+            atlas_masker.fit()
+
+            r2_map_3d = atlas_masker.inverse_transform(scores_r2)
+
+            display = plot_stat_map(
+                r2_map_3d,
+                threshold=0.01,
+                vmin=0,
+                vmax=np.max(scores_r2),
+                symmetric_cbar=False,
+                display_mode='mosaic',
+                title=f'R² Map pour {self.subject} - {self.layer}',
+                colorbar=True,
+                cmap='YlOrRd',
+            )
+            display.savefig(f"../output/brain_map_{self.subject}_{self.layer}_parcelles.png", dpi=300)
+            display.close()
+            print(f"Carte cérébrale sauvegardée : brain_map_{self.subject}_{self.layer}_parcelles.png")
+
         else:
-            nom_parcelle_max = parcelle_max
+            self.print_scores(scores_r2, noms_parcelles=None)
 
-        print(f"\n=========================================")
-        print(f"[Résultats Finaux Robustes — couche {self.layer}]")
-        print(f"R² moyen   : {score_moyen:.4f}")
-        print(f"R² médian  : {score_median:.4f}")
-        print(f"R² max     : {score_max:.4f}  (parcelle {nom_parcelle_max})")
-        print(f"Parcelles R² > 0 : {n_positifs} / {len(scores_finaux)}")
-        print(f"=========================================")
+            _, _, _, _, masque_path = self.get_path_file_by_plateform(self.plateforme)
+
+            masker = NiftiMasker(mask_img=masque_path, standardize=False)
+            masker.fit()
+
+            r2_map_3d = masker.inverse_transform(scores_r2)
+
+            display = plot_stat_map(
+                r2_map_3d,
+                threshold=0.01,
+                vmin=0,
+                vmax=np.max(scores_r2),
+                symmetric_cbar=False,
+                display_mode='mosaic',
+                title=f'R² Map pour {self.subject} - {self.layer}',
+                colorbar=True,
+                cmap='YlOrRd',
+            )
+            display.savefig(f"../output/brain_map_{self.subject}_{self.layer}_voxel.png", dpi=300)
+            display.close()
+            print(f"Carte cérébrale sauvegardée : brain_map_{self.subject}_{self.layer}_voxel.png")
 
 if __name__ == "__main__":
 
@@ -300,41 +395,15 @@ if __name__ == "__main__":
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
+    flag_precision_voxel = True
 
     mode = "train"
-    cv_type = "CustomHoldOut"
+    cv_type = "CustomHoldout"
     PCA_flag = False
 
-    ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps)
+    ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel)
 
     scores_r2 = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
 
     if scores_r2 is not None:
-        noms_parcelles = ridge.charger_noms_parcelles(plateforme)
-        ridge.print_scores(scores_r2, noms_parcelles)
-
-        # Chemin vers ton atlas correspondant (le même que dans ton pipeline)
-        _,_,_,_,atlas_path = ridge.get_path_file_by_plateform(plateforme)
-
-        # Création du masker
-        atlas_masker = NiftiLabelsMasker(labels_img=atlas_path, standardize=False)
-        atlas_masker.fit()
-
-        # Projection 1D -> 3D
-        r2_map_3d = atlas_masker.inverse_transform(scores_r2)
-
-        # Plot
-        display = plot_stat_map(
-            r2_map_3d,
-            threshold=0.01,  # Filtre les résultats non significatifs
-            vmin=0,
-            vmax=np.max(scores_r2),
-            symmetric_cbar=False,
-            display_mode='mosaic',
-            title=f'R² Map pour {SUB} - {LAYER}',
-            colorbar=True,
-            cmap='YlOrRd',
-        )
-        display.savefig(f"../output/brain_map_{SUB}_{LAYER}_3.png", dpi=300)
-        display.close()
-        print(f"Carte cérébrale sauvegardée : brain_map_{SUB}_{LAYER}.png")
+        ridge.brain_mapping(scores_r2)
