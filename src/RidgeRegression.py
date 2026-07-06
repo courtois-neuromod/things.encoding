@@ -52,13 +52,18 @@ class RidgeRegression:
                     ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
                     f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
             )
-            return ROOT, chemin_tribe, chemin_cneuromod
+
+            chemin_atlas = (
+                    ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
+                    f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
+            )
+            return ROOT, chemin_tribe, chemin_cneuromod, chemin_atlas
 
     def discover_runs(self):
         if self.plateforme == "Roquale":
-            ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod = self.get_path_file_by_plateform(self.plateforme)
+            ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, _ = self.get_path_file_by_plateform(self.plateforme)
         else :
-            ROOT, chemin_tribe, chemin_cneuromod = self.get_path_file_by_plateform(self.plateforme)
+            ROOT, chemin_tribe, chemin_cneuromod, _ = self.get_path_file_by_plateform(self.plateforme)
 
         if not chemin_tribe.exists():
             print(f"Erreur : Fichier introuvable : {chemin_tribe}")
@@ -92,9 +97,9 @@ class RidgeRegression:
     def prepare_X_and_Y(self):
 
         if self.plateforme == "Roquale":
-            ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod = self.get_path_file_by_plateform(self.plateforme)
+            ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, _ = self.get_path_file_by_plateform(self.plateforme)
         else :
-            ROOT, chemin_tribe, chemin_cneuromod = self.get_path_file_by_plateform(self.plateforme)
+            ROOT, chemin_tribe, chemin_cneuromod, _ = self.get_path_file_by_plateform(self.plateforme)
 
         runs = self.discover_runs()
 
@@ -146,12 +151,12 @@ class RidgeRegression:
     def ridge_regression(self, PCA_flag, alphas, X_train, Y_train, X_test, Y_test):
         # 2. Standardisation
         scaler_X = StandardScaler()
-        scaler_Y = StandardScaler()
+        #scaler_Y = StandardScaler()
 
         X_train_scaled = scaler_X.fit_transform(X_train)
-        Y_train_scaled = scaler_Y.fit_transform(Y_train)
+        #Y_train_scaled = scaler_Y.fit_transform(Y_train)
         X_test_scaled = scaler_X.transform(X_test)
-        Y_test_scaled = scaler_Y.transform(Y_test)
+        #Y_test_scaled = scaler_Y.transform(Y_test)
 
         if PCA_flag:
             pca = PCA(n_components=0.95)  # garde 95% de la variance
@@ -167,12 +172,14 @@ class RidgeRegression:
             Y_pred_scaled = modele.predict(X_test_reduit)
         else:
             modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-            modele.fit(X_train_scaled, Y_train_scaled)
+            #modele.fit(X_train_scaled, Y_train_scaled)
+            modele.fit(X_train_scaled, Y_train)
             Y_pred_scaled = modele.predict(X_test_scaled)
 
-        scores_r2 = r2_score(Y_test_scaled, Y_pred_scaled, multioutput="raw_values")
-
-        del X_train_scaled, Y_train_scaled, X_test_scaled, Y_test_scaled, modele
+        #scores_r2 = r2_score(Y_test_scaled, Y_pred_scaled, multioutput="raw_values")
+        scores_r2 = r2_score(Y_test, Y_pred_scaled, multioutput="raw_values")
+        #del X_train_scaled, Y_train_scaled, X_test_scaled, Y_test_scaled, modele
+        del X_train_scaled, Y_pred_scaled, X_test_scaled
         gc.collect()
 
         return scores_r2
@@ -258,12 +265,12 @@ class RidgeRegression:
 if __name__ == "__main__":
 
     # --- PARAMÈTRES ML ---
-    alphas = np.logspace(-1, 5, 20)
+    alphas = np.logspace(-1, 20, 20)
     logo = LeaveOneGroupOut()
 
     # Chemins
     plateforme = ["Roquale", "Mac"]
-    plateforme = plateforme[1]
+    plateforme = plateforme[0]
 
     SUB = "sub-03"
     LAYER = "encoder_layer7_ffn"
@@ -272,10 +279,12 @@ if __name__ == "__main__":
     centrage_donne_temps = False
 
     mode = "train"
-    type = "CustomHoldout"
+    type = "LeaveOneGroupOut"
     PCA_flag = False
 
     ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps)
+    ridge.print_scores(mode, type, alphas, PCA_flag)
+    
     scores_r2 = ridge.cross_validation(mode, type, alphas, PCA_flag)
 
     if scores_r2 is not None:
@@ -296,9 +305,8 @@ if __name__ == "__main__":
             display_mode='mosaic',
             title=f'R² Map pour {SUB} - {LAYER}',
             colorbar=True,
-            cmap='hot',
+            cmap='coolwarm',
         )
-        display.savefig(f"../output/brain_map_{SUB}_{LAYER}.png", dpi=150)
+        display.savefig(f"../output/brain_map_{SUB}_{LAYER}_2.png", dpi=300)
         display.close()
         print(f"Carte cérébrale sauvegardée : brain_map_{SUB}_{LAYER}.png")
-
