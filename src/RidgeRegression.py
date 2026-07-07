@@ -16,7 +16,17 @@ from sklearn.decomposition import PCA
 from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
 from nilearn.plotting import plot_stat_map
 import matplotlib
+from dataclasses import dataclass
+
 matplotlib.use('Agg')
+
+@dataclass
+class CheminsProjet:
+    root_encoding: Path
+    root_timeseries: Path
+    chemin_tribe: Path
+    chemin_cneuromod: Path
+    chemin_atlas: Path
 
 class RidgeRegression:
 
@@ -28,72 +38,27 @@ class RidgeRegression:
         self.centrage_donne_temps = centrage_donne_temps
         self.flag_precision_voxel = flag_precision_voxel
 
+
     def get_path_file_by_plateform(self, plateforme):
-        if self.flag_precision_voxel:
-            if plateforme == "Roquale":
-                ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
-                ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
-
-                chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
-
-                chemin_cneuromod = (
-                        ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject /
-                        f"{self.subject}_task-things_space-T1w_desc-voxelwise_timeseries.h5"
-                )
-
-                chemin_atlas = (
-                        ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject /
-                        f"{self.subject}_task-things_space-T1w_label-GMfromFS_desc-indivFunc_mask.nii.gz"
-                )
-
-                return ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas
-            else:
-                ROOT = Path(__file__).parent.parent
-
-                chemin_tribe = ROOT / "output" / "hdf5" / f"{self.subject}.h5"
-
-                chemin_cneuromod = (
-                        ROOT / "timeseries" / "voxel_native" / self.subject /
-                        f"{self.subject}_task-things_space-T1w_desc-voxelwise_timeseries.h5"
-                )
-
-                chemin_atlas = (
-                        ROOT / "timeseries" / "voxel_native" / self.subject /
-                        f"{self.subject}_task-things_space-T1w_label-GMfromFS_desc-indivFunc_mask.nii.gz"
-                )
-                return ROOT, chemin_tribe, chemin_cneuromod, chemin_atlas
+        if plateforme == "Roquale":
+            ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
+            ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
         else:
-            if plateforme == "Roquale":
-                ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
-                ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
+            ROOT_ENCODING = Path(__file__).parent.parent
+            ROOT_TIMESERIES = ROOT_ENCODING
 
-                chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
+        chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
 
-                chemin_cneuromod = (
-                        ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject /
-                        f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
-                )
+        if self.flag_precision_voxel:
+            sous_dossier = ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject
+            chemin_cneuromod = sous_dossier / f"{self.subject}_task-things_space-T1w_desc-voxelwise_timeseries.h5"
+            chemin_atlas = sous_dossier / f"{self.subject}_task-things_space-T1w_label-GMfromFS_desc-indivFunc_mask.nii.gz"
+        else:
+            sous_dossier = ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject
+            chemin_cneuromod = sous_dossier / f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
+            chemin_atlas = sous_dossier / f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
 
-                chemin_atlas = (
-                        ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject /
-                        f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
-                )
-                return ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas
-            else:
-                ROOT = Path(__file__).parent.parent
-
-                chemin_tribe = ROOT / "output" / "hdf5" / f"{self.subject}.h5"
-
-                chemin_cneuromod = (
-                        ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
-                        f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
-                )
-
-                chemin_atlas = (
-                        ROOT / "data" / "timeseries" / "cneuromod2026" / self.subject /
-                        f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
-                )
-                return ROOT, chemin_tribe, chemin_cneuromod, chemin_atlas
+        return CheminsProjet(ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas)
 
     def get_chemin_annotations_parcelles(self, plateforme):
         nom_fichier_annotations = (
@@ -112,20 +77,21 @@ class RidgeRegression:
         annotations = pd.read_csv(chemin_annotations, sep="\t")
         return annotations["name"].tolist()
 
-    def discover_runs(self):
-        if self.plateforme == "Roquale":
-            ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, _ = self.get_path_file_by_plateform(self.plateforme)
-        else :
-            ROOT, chemin_tribe, chemin_cneuromod, _ = self.get_path_file_by_plateform(self.plateforme)
+    def discover_runs(self,tribe_hdf5=None):
+        chemins = self.get_path_file_by_plateform(self.plateforme)
 
-        if not chemin_tribe.exists():
-            print(f"Erreur : Fichier introuvable : {chemin_tribe}")
+        if not chemins.chemin_tribe.exists():
+            print(f"Erreur : Fichier introuvable : {chemins.chemin_tribe}")
 
         runs = []
+        gere_localement = tribe_hdf5 is None
 
-        with h5py.File(chemin_tribe, "r") as f:
-            for tribe_ses in sorted(f.keys()):           # "ses-001", "ses-002", ...
-                for tribe_run in sorted(f[tribe_ses].keys()):   # "run-1", "run-2", ...
+        if gere_localement:
+            tribe_hdf5 = h5py.File(chemins.chemin_tribe, "r")
+
+        try:
+            for tribe_ses in sorted(tribe_hdf5.keys()):           # "ses-001", "ses-002", ...
+                for tribe_run in sorted(tribe_hdf5[tribe_ses].keys()):   # "run-1", "run-2", ...
 
                     # Conversion ses-001 → ses-01 pour CNeuroMod
                     num_ses = int(tribe_ses.replace("ses-", ""))
@@ -138,102 +104,127 @@ class RidgeRegression:
                     # Chemin vidéo originale (non CFR) pour ffprobe
                     nom_video = f"{self.subject}_{tribe_ses}_task-thingsmemory_{tribe_run}.mp4"
                     if self.plateforme == "Roquale":
-                        chemin_video = ROOT_ENCODING / "data" / "data" / self.subject / tribe_ses / nom_video
-                    else :
-                        chemin_video = ROOT / "data" / self.subject / tribe_ses / nom_video
+                        chemin_video = chemins.root_encoding / "data" / "data" / self.subject / tribe_ses / nom_video
+                    else:
+                        chemin_video = chemins.root_encoding / "data" / self.subject / tribe_ses / nom_video
 
                     runs.append((tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_dataset))
+        finally:
+            if gere_localement:
+                tribe_hdf5.close()
 
-            print(f"{len(runs)} runs trouvés dans {chemin_tribe.name}")
-            return runs
+        print(f"{len(runs)} runs trouvés dans {chemins.chemin_tribe.name}")
+        return runs
 
     def prepare_X_and_Y(self):
 
-        if self.plateforme == "Roquale":
-            ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, _ = self.get_path_file_by_plateform(self.plateforme)
-        else :
-            ROOT, chemin_tribe, chemin_cneuromod, _ = self.get_path_file_by_plateform(self.plateforme)
-
-        runs = self.discover_runs()
+        chemins = self.get_path_file_by_plateform(self.plateforme)
 
         # Alignement temporel et concaténation
         X_list, Y_list = [], []
         runs_ok = []
         groupes_list = []
 
-        for id_run, (tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_dataset) in enumerate(runs):
-            # Vérifier que la vidéo source existe localement
-            if not chemin_video.exists():
-                print(f"Vidéo manquante, run ignoré : {chemin_video.name}")
-                continue
+        with h5py.File(chemins.chemin_tribe, "r") as tribe_hdf5, \
+                h5py.File(chemins.chemin_cneuromod, "r") as cneuromod_hdf5:
 
-            normalisateur = TribeHDF5Normalization(
-                chemin_tribe=chemin_tribe,
-                chemin_cneuromod=chemin_cneuromod,
-                chemin_video=chemin_video,
-                tribe_ses=tribe_ses,
-                tribe_run=tribe_run,
-                tribe_layer=self.layer,
-                cneuromod_ses=cneuromod_ses,
-                cneuromod_dataset=cneuromod_dataset,
-                t_Tribe_s=0.5,
-                TR_irmf_s=1.49,
-                flag_delai_bold_brute=self.flag_delai_bold_brute,
-                centrage_donne_temps=self.centrage_donne_temps,
-            )
-            X_run, Y_run = normalisateur.executer_pipeline()
-            X_list.append(X_run)
-            Y_list.append(Y_run)
-            runs_ok.append(f"{tribe_ses}/{tribe_run}")
-            num_ses = int(tribe_ses.replace("ses-", ""))
-            id_array = np.full(X_run.shape[0], num_ses)
-            groupes_list.append(id_array)
+            runs = self.discover_runs(tribe_hdf5=tribe_hdf5)
 
-        print(f"\n{len(runs_ok)} runs traités avec succès")
+            for (tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_dataset) in runs:
+                # Vérifier que la vidéo source existe localement
+                if not chemin_video.exists():
+                    print(f"Vidéo manquante, run ignoré : {chemin_video.name}")
+                    continue
 
-        X = np.concatenate(X_list, axis=0)
-        Y = np.concatenate(Y_list, axis=0)
-        groupes = np.concatenate(groupes_list, axis=0)
-        print(f"Matrice finale : X={X.shape}, Y={Y.shape}")
+                normalisateur = TribeHDF5Normalization(
+                    chemin_tribe=chemins.chemin_tribe,
+                    chemin_cneuromod=chemins.chemin_cneuromod,
+                    chemin_video=chemin_video,
+                    tribe_ses=tribe_ses,
+                    tribe_run=tribe_run,
+                    tribe_layer=self.layer,
+                    cneuromod_ses=cneuromod_ses,
+                    cneuromod_dataset=cneuromod_dataset,
+                    t_Tribe_s=0.5,
+                    TR_irmf_s=1.49,
+                    flag_delai_bold_brute=self.flag_delai_bold_brute,
+                    centrage_donne_temps=self.centrage_donne_temps,
+                )
+                X_run, Y_run = normalisateur.executer_pipeline(
+                    tribe_hdf5=tribe_hdf5, cneuromod_hdf5=cneuromod_hdf5
+                )
+                X_list.append(X_run)
+                Y_list.append(Y_run)
+                runs_ok.append(f"{tribe_ses}/{tribe_run}")
+                num_ses = int(tribe_ses.replace("ses-", ""))
+                id_array = np.full(X_run.shape[0], num_ses)
+                groupes_list.append(id_array)
 
-        del X_list, Y_list, groupes_list
-        gc.collect()
+            print(f"\n{len(runs_ok)} runs traités avec succès")
 
-        return runs_ok, X, Y, groupes
+            X = np.concatenate(X_list, axis=0)
+            Y = np.concatenate(Y_list, axis=0)
+            groupes = np.concatenate(groupes_list, axis=0)
+            print(f"Matrice finale : X={X.shape}, Y={Y.shape}")
 
-    def ridge_regression(self, PCA_flag, alphas, X_train, Y_train, X_test, Y_test):
+            del X_list, Y_list, groupes_list
+
+            return runs_ok, X, Y, groupes
+
+    def ridge_regression(self, PCA_flag, alphas, X_train, Y_train, X_test, Y_test,taille_lot=5000):
         # 2. Standardisation
         scaler_X = StandardScaler()
-        #scaler_Y = StandardScaler()
 
         X_train_scaled = scaler_X.fit_transform(X_train)
-        #Y_train_scaled = scaler_Y.fit_transform(Y_train)
         X_test_scaled = scaler_X.transform(X_test)
-        #Y_test_scaled = scaler_Y.transform(Y_test)
 
         if PCA_flag:
             pca = PCA(n_components=0.95)  # garde 95% de la variance
-            X_train_reduit = pca.fit_transform(X_train_scaled)
-            X_test_reduit = pca.transform(X_test_scaled)
+            X_train_scaled = pca.fit_transform(X_train_scaled)
+            X_test_scaled = pca.transform(X_test_scaled)
+            print(f"      [PCA] Dimensions réduites de {X_train.shape[1]} à {X_train_scaled.shape[1]}")
 
-            if X_train_reduit.shape[1] < X_train.shape[1]:
-                print(f"      [PCA] Dimensions réduites de {X_train.shape[1]} à {X_train_reduit.shape[1]}")
+        n_cibles = Y_train.shape[1]
+        scores_r2 = np.zeros(n_cibles, dtype=np.float32)
+
+        # Accumulateurs pour le diagnostic global des alphas (sur tous les lots)
+        alphas_tous_lots = np.zeros(n_cibles, dtype=np.float64)
+
+        n_lots = int(np.ceil(n_cibles / taille_lot))
+
+        for i, debut in enumerate(range(0, n_cibles, taille_lot)):
+            fin = min(debut + taille_lot, n_cibles)
 
             modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-            modele.fit(X_train_reduit, Y_train)
-            #modele.fit(X_train_reduit, Y_train_scaled)
+            modele.fit(X_train_scaled, Y_train[:, debut:fin])
 
-            Y_pred_scaled = modele.predict(X_test_reduit)
-        else:
-            modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-            #modele.fit(X_train_scaled, Y_train_scaled)
-            modele.fit(X_train_scaled, Y_train)
-            Y_pred_scaled = modele.predict(X_test_scaled)
+            alphas_tous_lots[debut:fin] = modele.alpha_
 
-        #scores_r2 = r2_score(Y_test_scaled, Y_pred_scaled, multioutput="raw_values")
-        scores_r2 = r2_score(Y_test, Y_pred_scaled, multioutput="raw_values")
-        #del X_train_scaled, Y_train_scaled, X_test_scaled, Y_test_scaled, modele
-        del X_train_scaled, Y_pred_scaled, X_test_scaled
+            Y_pred_lot = modele.predict(X_test_scaled)
+            scores_r2[debut:fin] = r2_score(
+                Y_test[:, debut:fin], Y_pred_lot, multioutput="raw_values"
+            )
+
+            del modele, Y_pred_lot
+            gc.collect()
+
+            if i % 5 == 0 or i == n_lots - 1:
+                print(f"      [Ridge] Lot {i + 1}/{n_lots} traité (cibles {debut}-{fin})")
+
+        # --- Diagnostic : où se situent les alphas optimaux ? ---
+        print(f"[Diagnostic alphas] min={alphas_tous_lots.min():.2e}, "
+              f"max={alphas_tous_lots.max():.2e}, "
+              f"médiane={np.median(alphas_tous_lots):.2e}")
+
+        # Combien de cibles ont choisi les bornes extrêmes de ta grille ?
+        n_borne_min = np.sum(alphas_tous_lots == alphas.min())
+        n_borne_max = np.sum(alphas_tous_lots == alphas.max())
+        print(f"[Diagnostic alphas] {n_borne_min}/{len(alphas_tous_lots)} cibles à la borne MIN "
+              f"({alphas.min():.2e}), {n_borne_max}/{len(alphas_tous_lots)} à la borne MAX "
+              f"({alphas.max():.2e})")
+        # ----------------------------------------------------------
+
+        del X_train_scaled, X_test_scaled
         gc.collect()
 
         return scores_r2
@@ -249,10 +240,11 @@ class RidgeRegression:
                     print("Erreur X ou X ne contient rien ")
                     return None
 
-                print(f"\n[Validation Croisée] Lancement sur {len(np.unique(groupes))} sessions (Test sur 1 session par fold)...")
+                n_folds = len(np.unique(groupes))
+                print(f"\n[Validation Croisée] Lancement sur {n_folds} sessions (Test sur 1 session par fold)...")
 
                 scores_tous_les_folds = []
-                n_folds = len(np.unique(groupes))
+
                 for index_fold, (train_index, test_index) in enumerate(logo.split(X, Y, groupes)):
                     print(f"\n--- Évaluation du Fold {index_fold + 1}/{n_folds} ---")
 
@@ -266,7 +258,6 @@ class RidgeRegression:
                 scores_finaux = np.mean(scores_tous_les_folds, axis=0)
 
                 del X, Y, groupes
-                gc.collect()
 
                 return scores_finaux
 
@@ -294,7 +285,6 @@ class RidgeRegression:
                 scores_finaux = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_test, Y_test)
 
                 del X, Y, groupes
-                gc.collect()
 
                 return scores_finaux
         return None
@@ -302,32 +292,17 @@ class RidgeRegression:
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
-        score_moyen = np.mean(scores_finaux)
-        score_median = np.median(scores_finaux)
-        score_max = np.max(scores_finaux)
-        parcelle_max = np.argmax(scores_finaux)
-        n_positifs = np.sum(scores_finaux > 0)
-        if self.flag_precision_voxel == False:
-            if noms_parcelles is not None:
-                nom_parcelle_max = noms_parcelles[parcelle_max]
-            else:
-                nom_parcelle_max = parcelle_max
+        unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
+        index_max = np.argmax(scores_finaux)
+        label_max = index_max if noms_parcelles is None else noms_parcelles[index_max]
 
-            print(f"\n=========================================")
-            print(f"[Résultats Finaux Robustes — couche {self.layer}]")
-            print(f"R² moyen   : {score_moyen:.4f}")
-            print(f"R² médian  : {score_median:.4f}")
-            print(f"R² max     : {score_max:.4f}  (parcelle {nom_parcelle_max})")
-            print(f"Parcelles R² > 0 : {n_positifs} / {len(scores_finaux)}")
-            print(f"=========================================")
-        else :
-            print(f"\n=========================================")
-            print(f"[Résultats Finaux Robustes — couche {self.layer}]")
-            print(f"R² moyen   : {score_moyen:.4f}")
-            print(f"R² médian  : {score_median:.4f}")
-            print(f"R² max     : {score_max:.4f}  (parcelle {parcelle_max})")
-            print(f"Parcelles R² > 0 : {n_positifs} / {len(scores_finaux)}")
-            print(f"=========================================")
+        print(f"\n=========================================")
+        print(f"[Résultats Finaux Robustes — couche {self.layer}]")
+        print(f"R² moyen   : {np.mean(scores_finaux):.4f}")
+        print(f"R² médian  : {np.median(scores_finaux):.4f}")
+        print(f"R² max     : {np.max(scores_finaux):.4f}  ({unite} {label_max})")
+        print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
+        print(f"=========================================")
 
     def brain_mapping(self, scores_r2):
         if self.flag_precision_voxel == False:
@@ -388,14 +363,14 @@ if __name__ == "__main__":
 
     # Chemins
     plateforme = ["Roquale", "Mac"]
-    plateforme = plateforme[0]
+    plateforme = plateforme[1]
 
     SUB = "sub-03"
     LAYER = "encoder_layer7_ffn"
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
-    flag_precision_voxel = True
+    flag_precision_voxel = False
 
     mode = "train"
     cv_type = "CustomHoldout"
