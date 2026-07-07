@@ -51,12 +51,17 @@ class TribeHDF5Normalization:
         print(f"[Info] Durée lue par ffprobe : {duree_reelle} secondes")
         return duree_reelle
 
-    def executer_pipeline(self):
+    def executer_pipeline(self,tribe_hdf5=None, cneuromod_hdf5=None):
         """Exécute l'intégralité du pipeline de nettoyage et d'alignement."""
         print("[Traitement en cours] Ouverture des fichiers HDF5...")
 
-        with h5py.File(self.chemin_tribe, 'r') as tribe_hdf5, \
-                h5py.File(self.chemin_cneuromod, 'r') as cneuromod_hdf5:
+        gere_localement = tribe_hdf5 is None and cneuromod_hdf5 is None
+
+        if gere_localement:
+            tribe_hdf5 = h5py.File(self.chemin_tribe, 'r')
+            cneuromod_hdf5 = h5py.File(self.chemin_cneuromod, 'r')
+
+        try:
             # 1. Extraction Cneuromod (Cible Y) avec clés dynamiques
             dataset_cneuromod = cneuromod_hdf5[self.cneuromod_ses][self.cneuromod_dataset][:]
             self.Y_cible = dataset_cneuromod
@@ -110,7 +115,15 @@ class TribeHDF5Normalization:
             self.X_aligne = self.X_aligne[masque_valide]
             self.Y_cible = self.Y_cible[masque_valide]
 
+            self.X_aligne = self.X_aligne.astype(np.float32)
+            self.Y_cible = self.Y_cible.astype(np.float32)
+
             print(f"X (Tribe) : {self.X_aligne.shape} == Y (Cneuromod) : {self.Y_cible.shape}")
+
+        finally:
+            if gere_localement:
+                tribe_hdf5.close()
+                cneuromod_hdf5.close()
 
         return self.X_aligne, self.Y_cible
 
