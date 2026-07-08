@@ -15,7 +15,9 @@ from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.decomposition import PCA
 from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
 from nilearn.plotting import plot_stat_map
+from nilearn.datasets import load_mni152_template
 import matplotlib
+from matplotlib.ticker import FuncFormatter
 from dataclasses import dataclass
 
 matplotlib.use('Agg')
@@ -314,48 +316,54 @@ class RidgeRegression:
 
         if self.flag_precision_voxel == True:
             masker = NiftiMasker(mask_img=chemins.chemin_atlas, standardize=False)
-            bg_img = chemins.chemin_anatomie
+            kwargs_bg = {"bg_img": chemins.chemin_anatomie}
         else:
             masker = NiftiLabelsMasker(labels_img=chemins.chemin_atlas, standardize=False)
-            bg_img = None
+            kwargs_bg = {}
 
+        coords_R2_map = {'x': np.array([-52.5, -28.5, -12.5, 9.5, 21.5, 35.5, 47.5]), 'y': np.array([-96.5, -80.5, -60.5, -42.5, -26.5, 53.5, 69.5]), 'z': np.array([-18.5, -4.5, 7.5, 19.5, 31.5, 45.5, 61.5])}
         masker.fit()
         r2_map_3d = masker.inverse_transform(donnees_affichees)
 
         display = plot_stat_map(
             r2_map_3d,
             threshold=treshold,
-            bg_img=bg_img,
             vmin=vmin,
             vmax=vmax,
             symmetric_cbar=False,
             display_mode='mosaic',
+            cut_coords = coords_R2_map,
+            cbar_tick_format="%.1f",
             title=f'{nom_carte} pour {self.subject} - {self.layer}',
             colorbar=True,
             cmap=cmap,
+            **kwargs_bg,
         )
+
+        if echelle_log and display._cbar is not None:
+            display._cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda valeur, position: f"$10^{{{valeur:.0f}}}$"))
+
+
 
         suffixe = "voxel" if self.flag_precision_voxel else "parcelles"
         chemin_sortie = f"../output/brain_map_{self.subject}_{self.layer}_{nom_carte}_{suffixe}.png"
         display.savefig(chemin_sortie, dpi=300)
         display.close()
         print(f"Carte cérébrale sauvegardée : {chemin_sortie}")
-
         return
 
     def brain_mapping_r2(self, scores_r2, noms_parcelles=None):
         self.print_scores(scores_r2, noms_parcelles)
-        self._brain_mapping_generique(scores_r2, nom_carte="r2", cmap="YlOrRd", treshold=None, echelle_log=False, vmin=0, vmax=np.max(scores_r2))
+        coords = self._brain_mapping_generique(scores_r2, nom_carte="r2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0, vmax=np.max(scores_r2))
 
     def brain_mapping_alphas(self, alphas_tous_les_lots):
-        self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="log10_alphas", cmap="YlOrRd", treshold=None, echelle_log=True)
-
+        coords = self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="log10_alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True)
 
 
 if __name__ == "__main__":
 
     # --- PARAMÈTRES ML ---
-    alphas = np.logspace(-1, 7, 20)
+    alphas = np.logspace(0, 10, 20)
 
     # Chemins
     plateforme = ["Roquale", "Mac"]
