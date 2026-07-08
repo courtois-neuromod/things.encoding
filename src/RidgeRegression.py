@@ -230,7 +230,7 @@ class RidgeRegression:
         del X_train_scaled, X_test_scaled
         gc.collect()
 
-        return scores_r2
+        return scores_r2, alphas_tous_lots
 
 
     def cross_validation(self, mode, cv_type, alphas, PCA_flag):
@@ -241,35 +241,37 @@ class RidgeRegression:
 
                 if len(X) == 0 or len(Y) == 0:
                     print("Erreur X ou X ne contient rien ")
-                    return None
+                    return None, None
 
                 n_folds = len(np.unique(groupes))
                 print(f"\n[Validation Croisée] Lancement sur {n_folds} sessions (Test sur 1 session par fold)...")
 
                 scores_tous_les_folds = []
-
+                alphas_tous_les_folds = []
                 for index_fold, (train_index, test_index) in enumerate(logo.split(X, Y, groupes)):
                     print(f"\n--- Évaluation du Fold {index_fold + 1}/{n_folds} ---")
 
                     X_train, X_test = X[train_index], X[test_index]
                     Y_train, Y_test = Y[train_index], Y[test_index]
 
-                    scores_fold = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_test, Y_test)
+                    scores_fold, alphas_fold = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_test, Y_test)
                     scores_tous_les_folds.append(scores_fold)
+                    alphas_tous_les_folds.append(alphas_fold)
                     print(f"    -> R² max sur ce fold : {np.max(scores_fold):.5f}")
 
                 scores_finaux = np.mean(scores_tous_les_folds, axis=0)
+                alphas_finaux = np.mean(alphas_tous_les_folds, axis=0)
 
                 del X, Y, groupes
 
-                return scores_finaux
+                return scores_finaux, alphas_finaux
 
             elif cv_type == "CustomHoldout":
                 runs_ok, X, Y, groupes = self.prepare_X_and_Y()
 
                 if len(X) == 0 or len(Y) == 0:
                     print("Erreur X ou X ne contient rien ")
-                    return None
+                    return None, None
 
                 train_sessions = list(range(1, 13)) + list(range(18, 37))
                 test_sessions = [14, 15, 16]
@@ -285,12 +287,12 @@ class RidgeRegression:
                 print(f"                    Ignorées (Gaps)    : Sessions 13 et 17")
                 print(f"--- Dimensions | Train : {X_train.shape[0]} TRs | Test : {X_test.shape[0]} TRs ---")
 
-                scores_finaux = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_test, Y_test)
+                scores_finaux, alphas_finaux = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_test, Y_test)
 
                 del X, Y, groupes
 
-                return scores_finaux
-        return None
+                return scores_finaux, alphas_finaux
+        return None, None
 
 
 
@@ -307,61 +309,51 @@ class RidgeRegression:
         print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
         print(f"=========================================")
 
-    def brain_mapping(self, scores_r2):
-        if self.flag_precision_voxel == False:
-            noms_parcelles = self.charger_noms_parcelles(self.plateforme)
-            self.print_scores(scores_r2, noms_parcelles)
+    def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold = 0.01, echelle_log=False, vmin = None, vmax = None):
+        chemins = self.get_path_file_by_plateform(self.plateforme)
 
-            chemins = self.get_path_file_by_plateform(self.plateforme)
-            atlas_path = chemins.chemin_atlas
+        donnees_affichees = np.log10(donnees) if echelle_log else donnees
 
-            atlas_masker = NiftiLabelsMasker(labels_img=atlas_path, standardize=False)
-            atlas_masker.fit()
-
-            r2_map_3d = atlas_masker.inverse_transform(scores_r2)
-
-            display = plot_stat_map(
-                r2_map_3d,
-                threshold=0.01,
-                vmin=0,
-                vmax=np.max(scores_r2),
-                symmetric_cbar=False,
-                display_mode='mosaic',
-                title=f'R² Map pour {self.subject} - {self.layer}',
-                colorbar=True,
-                cmap='YlOrRd',
-            )
-            display.savefig(f"../output/brain_map_{self.subject}_{self.layer}_parcelles.png", dpi=300)
-            display.close()
-            print(f"Carte cérébrale sauvegardée : brain_map_{self.subject}_{self.layer}_parcelles.png")
-
+        if self.flag_precision_voxel == True:
+            masker = NiftiMasker(mask_img=chemins.chemin_atlas, standardize=False)
+            bg_img = chemins.chemin_anatomie
         else:
-            self.print_scores(scores_r2, noms_parcelles=None)
+            masker = NiftiLabelsMasker(labels_img=chemins.chemin_atlas, standardize=False)
+            bg_img = None
 
-            chemins = self.get_path_file_by_plateform(self.plateforme)
-            masque_path = chemins.chemin_atlas
-            anatomie_path = chemins.chemin_anatomie
+        masker.fit()
+        r2_map_3d = masker.inverse_transform(donnees_affichees)
 
-            masker = NiftiMasker(mask_img=masque_path, standardize=False)
-            masker.fit()
+        display = plot_stat_map(
+            r2_map_3d,
+            threshold=treshold,
+            bg_img=bg_img,
+            vmin=vmin if vmin is not None else np.min(donnees_affichees),
+            vmax=vmax if vmax is not None else np.max(donnees_affichees),
+            symmetric_cbar=False,
+            display_mode='mosaic',
+            title=f'{nom_carte} pour {self.subject} - {self.layer}',
+            colorbar=True,
+            cmap=cmap,
+        )
 
-            r2_map_3d = masker.inverse_transform(scores_r2)
+        suffixe = "voxel" if self.flag_precision_voxel else "parcelles"
+        chemin_sortie = f"../output/brain_map_{self.subject}_{self.layer}_{nom_carte}_{suffixe}.png"
+        display.savefig(chemin_sortie, dpi=300)
+        display.close()
+        print(f"Carte cérébrale sauvegardée : {chemin_sortie}")
 
-            display = plot_stat_map(
-                r2_map_3d,
-                threshold=0.01,
-                bg_img=anatomie_path,
-                vmin=0,
-                vmax=np.max(scores_r2),
-                symmetric_cbar=False,
-                display_mode='mosaic',
-                title=f'R² Map pour {self.subject} - {self.layer}',
-                colorbar=True,
-                cmap='YlOrRd',
-            )
-            display.savefig(f"../output/brain_map_{self.subject}_{self.layer}_voxel.png", dpi=300)
-            display.close()
-            print(f"Carte cérébrale sauvegardée : brain_map_{self.subject}_{self.layer}_voxel.png")
+        return
+
+
+    def brain_mapping_r2(self, scores_r2, noms_parcelles=None):
+        self.print_scores(scores_r2, noms_parcelles)
+        self._brain_mapping_generique(scores_r2, nom_carte="r2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0)
+
+    def brain_mapping_alphas(self, alphas_tous_les_lots):
+        self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="log10_alphas", cmap="YlOrRd", treshold=None, echelle_log=True)
+
+
 
 if __name__ == "__main__":
 
@@ -370,23 +362,24 @@ if __name__ == "__main__":
 
     # Chemins
     plateforme = ["Roquale", "Mac"]
-    plateforme = plateforme[0]
+    plateforme = plateforme[1]
 
     SUB = "sub-03"
     LAYER = "encoder_layer7_ffn"
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
-    flag_precision_voxel = True
+    flag_precision_voxel = False
 
     mode = "train"
-    cv_type = "LeaveOneGroupOut"
-    #cv_type = "CustomHoldout"
+    #cv_type = "LeaveOneGroupOut"
+    cv_type = "CustomHoldout"
     PCA_flag = False
 
     ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel)
 
-    scores_r2 = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
+    scores_r2, alphas_tous_lots = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
 
     if scores_r2 is not None:
-        ridge.brain_mapping(scores_r2)
+        ridge.brain_mapping_r2(scores_r2)
+        ridge.brain_mapping_alphas(alphas_tous_lots)
