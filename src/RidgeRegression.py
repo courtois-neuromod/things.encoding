@@ -294,8 +294,6 @@ class RidgeRegression:
                 return scores_finaux, alphas_finaux
         return None, None
 
-
-
     def print_scores(self, scores_finaux, noms_parcelles=None):
         unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
         index_max = np.argmax(scores_finaux)
@@ -328,8 +326,8 @@ class RidgeRegression:
             r2_map_3d,
             threshold=treshold,
             bg_img=bg_img,
-            vmin=vmin if vmin is not None else np.min(donnees_affichees),
-            vmax=vmax if vmax is not None else np.max(donnees_affichees),
+            vmin=vmin,
+            vmax=vmax,
             symmetric_cbar=False,
             display_mode='mosaic',
             title=f'{nom_carte} pour {self.subject} - {self.layer}',
@@ -345,10 +343,9 @@ class RidgeRegression:
 
         return
 
-
     def brain_mapping_r2(self, scores_r2, noms_parcelles=None):
         self.print_scores(scores_r2, noms_parcelles)
-        self._brain_mapping_generique(scores_r2, nom_carte="r2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0)
+        self._brain_mapping_generique(scores_r2, nom_carte="r2", cmap="YlOrRd", treshold=None, echelle_log=False, vmin=0, vmax=np.max(scores_r2))
 
     def brain_mapping_alphas(self, alphas_tous_les_lots):
         self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="log10_alphas", cmap="YlOrRd", treshold=None, echelle_log=True)
@@ -362,7 +359,7 @@ if __name__ == "__main__":
 
     # Chemins
     plateforme = ["Roquale", "Mac"]
-    plateforme = plateforme[1]
+    plateforme = plateforme[0]
 
     SUB = "sub-03"
     LAYER = "encoder_layer7_ffn"
