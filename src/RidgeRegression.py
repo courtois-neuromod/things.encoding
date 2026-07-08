@@ -27,6 +27,7 @@ class CheminsProjet:
     chemin_tribe: Path
     chemin_cneuromod: Path
     chemin_atlas: Path
+    chemin_anatomie: Path = None
 
 class RidgeRegression:
 
@@ -53,12 +54,14 @@ class RidgeRegression:
             sous_dossier = ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject
             chemin_cneuromod = sous_dossier / f"{self.subject}_task-things_space-T1w_desc-voxelwise_timeseries.h5"
             chemin_atlas = sous_dossier / f"{self.subject}_task-things_space-T1w_label-GMfromFS_desc-indivFunc_mask.nii.gz"
+            chemin_anatomie = sous_dossier / f"{self.subject}_desc-preproc_T1w.nii.gz"
         else:
             sous_dossier = ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject
             chemin_cneuromod = sous_dossier / f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
             chemin_atlas = sous_dossier / f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
+            chemin_anatomie = None
 
-        return CheminsProjet(ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas)
+        return CheminsProjet(ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas, chemin_anatomie)
 
     def get_chemin_annotations_parcelles(self, plateforme):
         nom_fichier_annotations = (
@@ -309,7 +312,8 @@ class RidgeRegression:
             noms_parcelles = self.charger_noms_parcelles(self.plateforme)
             self.print_scores(scores_r2, noms_parcelles)
 
-            _, _, _, _, atlas_path = self.get_path_file_by_plateform(self.plateforme)
+            chemins = self.get_path_file_by_plateform(self.plateforme)
+            atlas_path = chemins.chemin_atlas
 
             atlas_masker = NiftiLabelsMasker(labels_img=atlas_path, standardize=False)
             atlas_masker.fit()
@@ -334,7 +338,9 @@ class RidgeRegression:
         else:
             self.print_scores(scores_r2, noms_parcelles=None)
 
-            _, _, _, _, masque_path = self.get_path_file_by_plateform(self.plateforme)
+            chemins = self.get_path_file_by_plateform(self.plateforme)
+            masque_path = chemins.chemin_atlas
+            anatomie_path = chemins.chemin_anatomie
 
             masker = NiftiMasker(mask_img=masque_path, standardize=False)
             masker.fit()
@@ -344,6 +350,7 @@ class RidgeRegression:
             display = plot_stat_map(
                 r2_map_3d,
                 threshold=0.01,
+                bg_img=anatomie_path,
                 vmin=0,
                 vmax=np.max(scores_r2),
                 symmetric_cbar=False,
@@ -359,21 +366,22 @@ class RidgeRegression:
 if __name__ == "__main__":
 
     # --- PARAMÈTRES ML ---
-    alphas = np.logspace(-1, 20, 20)
+    alphas = np.logspace(-1, 7, 20)
 
     # Chemins
     plateforme = ["Roquale", "Mac"]
-    plateforme = plateforme[1]
+    plateforme = plateforme[0]
 
     SUB = "sub-03"
     LAYER = "encoder_layer7_ffn"
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
-    flag_precision_voxel = False
+    flag_precision_voxel = True
 
     mode = "train"
-    cv_type = "CustomHoldout"
+    cv_type = "LeaveOneGroupOut"
+    #cv_type = "CustomHoldout"
     PCA_flag = False
 
     ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel)
