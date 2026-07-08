@@ -15,7 +15,6 @@ from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.decomposition import PCA
 from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
 from nilearn.plotting import plot_stat_map
-from nilearn.datasets import load_mni152_template
 import matplotlib
 from matplotlib.ticker import FuncFormatter
 from dataclasses import dataclass
@@ -33,13 +32,14 @@ class CheminsProjet:
 
 class RidgeRegression:
 
-    def __init__(self, plateforme, subject, layer,  flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel):
+    def __init__(self, plateforme, subject, layer,  flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, randomize_flag = False):
         self.plateforme = plateforme
         self.subject = subject
         self.layer = layer
         self.flag_delai_bold_brute = flag_delai_bold_brute
         self.centrage_donne_temps = centrage_donne_temps
         self.flag_precision_voxel = flag_precision_voxel
+        self.randomize_flag = randomize_flag
 
 
     def get_path_file_by_plateform(self, plateforme):
@@ -121,7 +121,7 @@ class RidgeRegression:
         print(f"{len(runs)} runs trouvés dans {chemins.chemin_tribe.name}")
         return runs
 
-    def prepare_X_and_Y(self):
+    def prepare_X_and_Y(self,):
 
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
@@ -160,6 +160,7 @@ class RidgeRegression:
                 )
                 X_list.append(X_run)
                 Y_list.append(Y_run)
+
                 runs_ok.append(f"{tribe_ses}/{tribe_run}")
                 num_ses = int(tribe_ses.replace("ses-", ""))
                 id_array = np.full(X_run.shape[0], num_ses)
@@ -167,8 +168,21 @@ class RidgeRegression:
 
             print(f"\n{len(runs_ok)} runs traités avec succès")
 
+            if self.randomize_flag:
+                rng = np.random.default_rng(42)
+                nombre_de_runs = len(Y_list)
+
+                while True:
+                    nouvel_ordre = rng.permutation(nombre_de_runs)
+                    if not np.any(nouvel_ordre == np.arange(nombre_de_runs)):
+                        break
+
+                Y_list = [Y_list[i] for i in nouvel_ordre]
+                print(f"⚠Baseline activée : Y_list réordonné aléatoirement ({nombre_de_runs} runs, aucun n'a gardé sa position d'origine)")
+
             X = np.concatenate(X_list, axis=0)
             Y = np.concatenate(Y_list, axis=0)
+
             groupes = np.concatenate(groupes_list, axis=0)
             print(f"Matrice finale : X={X.shape}, Y={Y.shape}")
 
@@ -375,13 +389,14 @@ if __name__ == "__main__":
     flag_delai_bold_brute = True
     centrage_donne_temps = False
     flag_precision_voxel = False
+    randomize_flag = True
 
     mode = "train"
     #cv_type = "LeaveOneGroupOut"
     cv_type = "CustomHoldout"
     PCA_flag = False
 
-    ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel)
+    ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, randomize_flag)
 
     scores_r2, alphas_tous_lots = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
 
