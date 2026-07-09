@@ -17,6 +17,7 @@ from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
 from nilearn.plotting import plot_stat_map
 import matplotlib
 from matplotlib.ticker import FuncFormatter
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
 
 matplotlib.use('Agg')
@@ -339,8 +340,11 @@ class RidgeRegression:
         masker.fit()
         r2_map_3d = masker.inverse_transform(donnees_affichees)
 
+        fig = plt.figure(figsize=(14, 10), facecolor='white')
+
         display = plot_stat_map(
             r2_map_3d,
+            figure=fig,
             threshold=treshold,
             vmin=vmin,
             vmax=vmax,
@@ -348,19 +352,19 @@ class RidgeRegression:
             display_mode='mosaic',
             cut_coords = coords_R2_map,
             cbar_tick_format="%.1f",
-            title=f'{nom_carte} pour {self.subject} - {self.layer}',
             colorbar=True,
             cmap=cmap,
             **kwargs_bg,
         )
+        unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
+        title=f'{nom_carte} pour {self.subject} - {self.layer} en {unite}'
+        fig.suptitle(titre, fontsize=18, fontweight='bold', color='black', y=0.98, ha='center')
+        fig.subplots_adjust(top=0.92)
 
         if echelle_log and display._cbar is not None:
             display._cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda valeur, position: f"$10^{{{valeur:.0f}}}$"))
 
-
-
-        suffixe = "voxel" if self.flag_precision_voxel else "parcelles"
-        chemin_sortie = f"../output/brain_map_{self.subject}_{self.layer}_{nom_carte}_{suffixe}.png"
+        chemin_sortie = f"../output/brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}.png"
         display.savefig(chemin_sortie, dpi=300)
         display.close()
         print(f"Carte cérébrale sauvegardée : {chemin_sortie}")
@@ -368,10 +372,10 @@ class RidgeRegression:
 
     def brain_mapping_r2(self, scores_r2, noms_parcelles=None):
         self.print_scores(scores_r2, noms_parcelles)
-        coords = self._brain_mapping_generique(scores_r2, nom_carte="r2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0, vmax=np.max(scores_r2))
+        coords = self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0, vmax=np.max(scores_r2))
 
     def brain_mapping_alphas(self, alphas_tous_les_lots):
-        coords = self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="log10_alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True)
+        coords = self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True)
 
 
 if __name__ == "__main__":
@@ -383,13 +387,13 @@ if __name__ == "__main__":
     plateforme = ["Roquale", "Mac"]
     plateforme = plateforme[0]
 
-    SUB = "sub-03"
+    SUB = "sub-01"
     LAYER = "encoder_layer7_ffn"
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
     flag_precision_voxel = False
-    randomize_flag = True
+    randomize_flag = False
 
     mode = "train"
     #cv_type = "LeaveOneGroupOut"
@@ -403,3 +407,4 @@ if __name__ == "__main__":
     if scores_r2 is not None:
         ridge.brain_mapping_r2(scores_r2)
         ridge.brain_mapping_alphas(alphas_tous_lots)
+
