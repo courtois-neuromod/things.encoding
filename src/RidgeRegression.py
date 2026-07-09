@@ -277,11 +277,12 @@ class RidgeRegression:
                     print(f"    -> R² max sur ce fold : {np.max(scores_fold):.5f}")
 
                 scores_finaux = np.mean(scores_tous_les_folds, axis=0)
-                alphas_finaux = np.mean(alphas_tous_les_folds, axis=0)
+                log_alphas = np.log10(alphas_tous_les_folds)
+                alphas_finaux = 10 ** np.mean(log_alphas, axis=0)
 
                 del X, Y, groupes
 
-                return scores_finaux, alphas_finaux
+                return scores_finaux, alphas_finaux, alphas_tous_les_folds
 
             elif cv_type == "CustomHoldout":
                 runs_ok, X, Y, groupes = self.prepare_X_and_Y()
@@ -308,7 +309,7 @@ class RidgeRegression:
 
                 del X, Y, groupes
 
-                return scores_finaux, alphas_finaux
+                return scores_finaux, alphas_finaux, [alphas_finaux]
         return None, None
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
@@ -323,6 +324,53 @@ class RidgeRegression:
         print(f"R² max     : {np.max(scores_finaux):.4f}  ({unite} {label_max})")
         print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
         print(f"=========================================")
+
+    def plot_alphas_histogram(self, alphas_par_fold, grille_alphas):
+        fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
+        log10_grille = np.log10(grille_alphas)
+
+        step = log10_grille[1] - log10_grille[0]
+        bins = np.append(log10_grille - step / 2, log10_grille[-1] + step / 2)
+
+        n_folds = len(alphas_par_fold)
+        cmap = plt.get_cmap("tab20" if n_folds <= 20 else "viridis")
+
+        for cv_fold, best_alphas in enumerate(alphas_par_fold):
+            log10_best_alphas = np.log10(best_alphas)
+
+            hist, _ = np.histogram(log10_best_alphas, bins=bins)
+
+            couleur = cmap(cv_fold / max(1, n_folds - 1)) if n_folds > 1 else "#d73027"
+            label = f"Fold {cv_fold + 1}" if n_folds > 1 else "Test Unique"
+
+            ax.plot(
+                log10_grille, hist,
+                marker="o" if n_folds < 15 else "",
+                linestyle="-", color=couleur, linewidth=2, alpha=0.8, label=label
+            )
+
+        unite = "voxels" if self.flag_precision_voxel else "parcelles"
+        ax.set_ylabel(f"Nombre de {unite}", fontsize=12)
+        ax.set_xlabel(r"$\log_{10}(\alpha)$", fontsize=12)
+
+        titre = f"Distribution des Alphas optimaux par Fold\n{self.subject} - {self.layer}"
+        ax.set_title(titre, fontsize=15, fontweight='bold')
+        ax.grid(True, linestyle='--', alpha=0.7)
+
+        ax.set_xticks(log10_grille)
+        ax.set_xticklabels([f"{x:.1f}" for x in log10_grille], rotation=45)
+
+        if n_folds > 1:
+            ax.legend(fontsize=9, bbox_to_anchor=(1.05, 1), loc='upper left', ncol=(n_folds // 15 + 1))
+        else:
+            ax.legend(fontsize=11)
+
+        nom_fichier = f"histogram_alphas_folds_{self.subject}_{self.layer}_{unite}.png"
+        chemin_sortie = self.get_path_file_by_plateform(self.plateforme).root_encoding / "output" / nom_fichier
+
+        fig.savefig(chemin_sortie, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Histogramme diagnostic sauvegardé : {chemin_sortie}")
 
     def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold = 0.01, echelle_log=False, vmin = None, vmax = None):
         chemins = self.get_path_file_by_plateform(self.plateforme)
@@ -358,7 +406,7 @@ class RidgeRegression:
         )
         unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
         title=f'{nom_carte} pour {self.subject} - {self.layer} en {unite}'
-        fig.suptitle(titre, fontsize=18, fontweight='bold', color='black', y=0.98, ha='center')
+        fig.suptitle(title, fontsize=18, fontweight='bold', color='black', y=0.98, ha='center')
         fig.subplots_adjust(top=0.92)
 
         if echelle_log and display._cbar is not None:
@@ -372,20 +420,21 @@ class RidgeRegression:
 
     def brain_mapping_r2(self, scores_r2, noms_parcelles=None):
         self.print_scores(scores_r2, noms_parcelles)
-        coords = self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0, vmax=np.max(scores_r2))
+        self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0, vmax=np.max(scores_r2))
 
     def brain_mapping_alphas(self, alphas_tous_les_lots):
-        coords = self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True)
+        self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True)
+
 
 
 if __name__ == "__main__":
 
     # --- PARAMÈTRES ML ---
-    alphas = np.logspace(0, 10, 20)
+    alphas = np.logspace(-1, 10, 20)
 
     # Chemins
     plateforme = ["Roquale", "Mac"]
-    plateforme = plateforme[0]
+    plateforme = plateforme[1]
 
     SUB = "sub-01"
     LAYER = "encoder_layer7_ffn"
@@ -402,9 +451,10 @@ if __name__ == "__main__":
 
     ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, randomize_flag)
 
-    scores_r2, alphas_tous_lots = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
+    scores_r2, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
 
     if scores_r2 is not None:
         ridge.brain_mapping_r2(scores_r2)
         ridge.brain_mapping_alphas(alphas_tous_lots)
+        ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
 
