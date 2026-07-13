@@ -19,6 +19,7 @@ import matplotlib
 from matplotlib.ticker import FuncFormatter
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
+import plotly.express as px
 
 matplotlib.use('Agg')
 
@@ -29,11 +30,13 @@ class CheminsProjet:
     chemin_tribe: Path
     chemin_cneuromod: Path
     chemin_atlas: Path
+    chemin_ROImask: Path
     chemin_anatomie: Path = None
+
 
 class RidgeRegression:
 
-    def __init__(self, plateforme, subject, layer,  flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, randomize_flag = False):
+    def __init__(self, plateforme, subject, layer,  flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, ROImask_flag, randomize_flag = False):
         self.plateforme = plateforme
         self.subject = subject
         self.layer = layer
@@ -41,6 +44,7 @@ class RidgeRegression:
         self.centrage_donne_temps = centrage_donne_temps
         self.flag_precision_voxel = flag_precision_voxel
         self.randomize_flag = randomize_flag
+        self.ROImask_flag = ROImask_flag
 
 
     def get_path_file_by_plateform(self, plateforme):
@@ -52,6 +56,7 @@ class RidgeRegression:
             ROOT_TIMESERIES = ROOT_ENCODING
 
         chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
+        chemin_ROImask = ROOT_ENCODING / "data" / "brain_map_subj" / f"{self.subject}_space-T1w_desc-ROImasks_voxelAnnotations.h5"
 
         if self.flag_precision_voxel:
             sous_dossier = ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject
@@ -64,7 +69,7 @@ class RidgeRegression:
             chemin_atlas = sous_dossier / f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
             chemin_anatomie = None
 
-        return CheminsProjet(ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas, chemin_anatomie)
+        return CheminsProjet(ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas, chemin_ROImask, chemin_anatomie)
 
     def get_chemin_annotations_parcelles(self, plateforme):
         nom_fichier_annotations = (
@@ -202,9 +207,14 @@ class RidgeRegression:
     def ridge_regression(self, PCA_flag, alphas, X_train, Y_train, X_test, Y_test,taille_lot=5000):
         # 2. Standardisation
         scaler_X = StandardScaler()
+        scaler_Y = StandardScaler()
 
         X_train_scaled = scaler_X.fit_transform(X_train)
+        Y_train_scaled = scaler_Y.fit_transform(Y_train)
+        #Y_train_scaled = Y_train
         X_test_scaled = scaler_X.transform(X_test)
+        Y_test_scaled = scaler_Y.transform(Y_test)
+        #Y_test_scaled = Y_test
 
         if PCA_flag:
             pca = PCA(n_components=0.95)  # garde 95% de la variance
@@ -212,7 +222,7 @@ class RidgeRegression:
             X_test_scaled = pca.transform(X_test_scaled)
             print(f"      [PCA] Dimensions réduites de {X_train.shape[1]} à {X_train_scaled.shape[1]}")
 
-        n_cibles = Y_train.shape[1]
+        n_cibles = Y_train_scaled.shape[1]
         scores_r2 = np.zeros(n_cibles, dtype=np.float32)
 
         # Accumulateurs pour le diagnostic global des alphas (sur tous les lots)
@@ -224,13 +234,13 @@ class RidgeRegression:
             fin = min(debut + taille_lot, n_cibles)
 
             modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-            modele.fit(X_train_scaled, Y_train[:, debut:fin])
+            modele.fit(X_train_scaled, Y_train_scaled[:, debut:fin])
 
             alphas_tous_lots[debut:fin] = modele.alpha_
 
             Y_pred_lot = modele.predict(X_test_scaled)
             scores_r2[debut:fin] = r2_score(
-                Y_test[:, debut:fin], Y_pred_lot, multioutput="raw_values"
+                Y_test_scaled[:, debut:fin], Y_pred_lot, multioutput="raw_values"
             )
 
             del modele, Y_pred_lot
@@ -290,7 +300,7 @@ class RidgeRegression:
 
                 del X, Y, groupes
 
-                return scores_finaux, alphas_finaux, alphas_tous_les_folds
+                return scores_finaux, scores_tous_les_folds, alphas_finaux, alphas_tous_les_folds
 
             elif cv_type == "CustomHoldout":
                 runs_ok, X, Y, groupes = self.prepare_X_and_Y()
@@ -317,7 +327,7 @@ class RidgeRegression:
 
                 del X, Y, groupes
 
-                return scores_finaux, alphas_finaux, [alphas_finaux]
+                return scores_finaux, [scores_finaux], alphas_finaux, [alphas_finaux]
         return None, None
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
@@ -332,6 +342,34 @@ class RidgeRegression:
         print(f"R² max     : {np.max(scores_finaux):.4f}  ({unite} {label_max})")
         print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
         print(f"=========================================")
+
+    def plot_ROImask_histogram(self, scores_finaux, liste_ROI):
+        chemins = self.get_path_file_by_plateform(self.plateforme)
+        fichier_ROImask = chemins.chemin_ROImask
+
+        ROIs_noms = []
+        ROIs_vecteur = []
+
+        if flag_precision_voxel:
+            with h5py.File(fichier_ROImask, 'r') as fichier:
+                for groupe in fichier.keys():
+                    for sous_cle in fichier[groupe].keys():
+                        ROI_dataset = fichier[groupe][sous_cle]
+                        if sous_cle in liste_ROI:
+                            vecteur = ROI_dataset[:].astype(bool)
+                            scores_roi = scores_finaux[vecteur]
+                            ROIs_noms.extend([sous_cle] * len(scores_roi))
+                            ROIs_vecteur.extend(scores_roi)
+                df = pd.DataFrame({"ROI": ROIs_noms, "r2": ROIs_vecteur})
+                print(df.shape)
+
+                fig = px.box(df, x="ROI", y="r2", color="ROI", points=False)
+                fig.write_html(str(chemins.root_encoding / "output" / f"ROImask_{self.subject}.html"))
+            print("Histogramme ROI sauvegardé :", str(chemins.root_encoding / "output" / f"ROImask_{self.subject}.html"))
+            return
+        else:
+            return "Pas en voxel"
+
 
     def plot_alphas_histogram(self, alphas_par_fold, grille_alphas, suffix=""):
         fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
@@ -445,10 +483,10 @@ if __name__ == "__main__":
 
     # --- PARAMÈTRES ---
     plateforme = ["Roquale", "Mac"]
-    plateforme = plateforme[0]
+    plateforme = plateforme[1]
 
     liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
-    #liste_sujets = liste_sujets[2:3]
+    liste_sujets = liste_sujets[2:3]
     LAYER = "encoder_layer7_ffn"
 
     flag_delai_bold_brute = True
@@ -456,17 +494,32 @@ if __name__ == "__main__":
     flag_precision_voxel = True
     randomize_flag = False
     flag_opt_alphas = False
+    ROImask_flag = True
 
     mode = "train"
     cv_type = "CustomHoldout"
     PCA_flag = False
 
+    liste_ROI = ["faceFFA","scenePPA", "bodyEBA", "V1", "V2", "V3", "hv4"]
+
     # Paramètres de la boucle d'optimisation adaptative
     max_iterations = 100
     tolerance_evolution = 1e-4
 
+    alphas = np.logspace(1, 4, 20)
+
+    ridge = RidgeRegression(plateforme, liste_sujets[0], LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel,
+                            ROImask_flag, randomize_flag)
+    scores_r2, scores_r2_tousl_les_folds, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
+    ridge.plot_ROImask_histogram(scores_r2, liste_ROI)
+    ridge.brain_mapping_r2(scores_r2)
+    ridge.brain_mapping_alphas(alphas_tous_lots)
+    ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
+
+
+"""
     for SUB in liste_sujets:
-        ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, randomize_flag)
+        ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, ROImask_flag, randomize_flag)
 
         if flag_opt_alphas:
             # --- MODE OPTIMISATION : boucle adaptive sur la grille d'alphas ---
@@ -554,3 +607,4 @@ if __name__ == "__main__":
                 ridge.brain_mapping_r2(scores_r2)
                 ridge.brain_mapping_alphas(alphas_tous_lots)
                 ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
+"""
