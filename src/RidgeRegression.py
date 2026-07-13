@@ -138,8 +138,16 @@ class RidgeRegression:
 
             for (tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_dataset) in runs:
                 # Vérifier que la vidéo source existe localement
+                if self.subject == "sub-06" and cneuromod_ses == "ses-08" and tribe_run == "run-06" :
+                    print(f"{cneuromod_ses} ignorée pour {self.subject} (décision manuelle : mauvais alignement).")
+                    continue
+
                 if not chemin_video.exists():
                     print(f"Vidéo manquante, run ignoré : {chemin_video.name}")
+                    continue
+
+                if cneuromod_ses not in cneuromod_hdf5 or cneuromod_dataset not in cneuromod_hdf5[cneuromod_ses]:
+                    print(f"CNeuroMod : Données IRMf absentes pour {cneuromod_ses} / {cneuromod_dataset}. Run ignoré.")
                     continue
 
                 normalisateur = TribeHDF5Normalization(
@@ -325,7 +333,7 @@ class RidgeRegression:
         print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
         print(f"=========================================")
 
-    def plot_alphas_histogram(self, alphas_par_fold, grille_alphas):
+    def plot_alphas_histogram(self, alphas_par_fold, grille_alphas, suffix=""):
         fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
         log10_grille = np.log10(grille_alphas)
 
@@ -343,11 +351,16 @@ class RidgeRegression:
             couleur = cmap(cv_fold / max(1, n_folds - 1)) if n_folds > 1 else "#d73027"
             label = f"Fold {cv_fold + 1}" if n_folds > 1 else "Test Unique"
 
-            ax.plot(
-                log10_grille, hist,
-                marker="o" if n_folds < 15 else "",
-                linestyle="-", color=couleur, linewidth=2, alpha=0.8, label=label
-            )
+            if n_folds == 1:
+                # Vrais bâtons pleins classiques pour 1 seul test
+                ax.hist(
+                    log10_best_alphas, bins=bins, color=couleur, edgecolor="black", alpha=0.8, label=label
+                )
+            else:
+                # Bâtons non-remplis pour superposer plusieurs folds proprement
+                ax.hist(
+                    log10_best_alphas, bins=bins, histtype="step",color=couleur, linewidth=2, alpha=0.8, label=label
+                )
 
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
         ax.set_ylabel(f"Nombre de {unite}", fontsize=12)
@@ -365,14 +378,14 @@ class RidgeRegression:
         else:
             ax.legend(fontsize=11)
 
-        nom_fichier = f"histogram_alphas_folds_{self.subject}_{self.layer}_{unite}.png"
+        nom_fichier = f"histogram_alphas_folds_{self.subject}_{self.layer}_{unite}{suffix}.png"
         chemin_sortie = self.get_path_file_by_plateform(self.plateforme).root_encoding / "output" / nom_fichier
 
         fig.savefig(chemin_sortie, dpi=300, bbox_inches='tight')
         plt.close(fig)
         print(f"Histogramme diagnostic sauvegardé : {chemin_sortie}")
 
-    def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold = 0.01, echelle_log=False, vmin = None, vmax = None):
+    def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold = 0.01, echelle_log=False, vmin = None, vmax = None, suffix=""):
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
         donnees_affichees = np.log10(donnees) if echelle_log else donnees
@@ -399,7 +412,7 @@ class RidgeRegression:
             symmetric_cbar=False,
             display_mode='mosaic',
             cut_coords = coords_R2_map,
-            cbar_tick_format="%.1f",
+            cbar_tick_format="%.2f",
             colorbar=True,
             cmap=cmap,
             **kwargs_bg,
@@ -412,49 +425,132 @@ class RidgeRegression:
         if echelle_log and display._cbar is not None:
             display._cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda valeur, position: f"$10^{{{valeur:.0f}}}$"))
 
-        chemin_sortie = f"../output/brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}.png"
+        chemin_sortie = f"../output/brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}{suffix}.png"
         display.savefig(chemin_sortie, dpi=300)
         display.close()
+        plt.close(fig)
         print(f"Carte cérébrale sauvegardée : {chemin_sortie}")
         return
 
-    def brain_mapping_r2(self, scores_r2, noms_parcelles=None):
+    def brain_mapping_r2(self, scores_r2, noms_parcelles=None, suffix=""):
         self.print_scores(scores_r2, noms_parcelles)
-        self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0, vmax=np.max(scores_r2))
+        self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0, vmax=np.max(scores_r2), suffix=suffix)
 
-    def brain_mapping_alphas(self, alphas_tous_les_lots):
-        self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True)
+    def brain_mapping_alphas(self, alphas_tous_les_lots, suffix=""):
+        self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True, suffix=suffix)
 
 
 
 if __name__ == "__main__":
 
-    # --- PARAMÈTRES ML ---
-    alphas = np.logspace(-1, 10, 20)
-
-    # Chemins
+    # --- PARAMÈTRES ---
     plateforme = ["Roquale", "Mac"]
-    plateforme = plateforme[1]
+    plateforme = plateforme[0]
 
-    SUB = "sub-01"
+    liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
+    #liste_sujets = liste_sujets[2:3]
     LAYER = "encoder_layer7_ffn"
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
-    flag_precision_voxel = False
+    flag_precision_voxel = True
     randomize_flag = False
+    flag_opt_alphas = False
 
     mode = "train"
-    #cv_type = "LeaveOneGroupOut"
     cv_type = "CustomHoldout"
     PCA_flag = False
 
-    ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, randomize_flag)
+    # Paramètres de la boucle d'optimisation adaptative
+    max_iterations = 100
+    tolerance_evolution = 1e-4
 
-    scores_r2, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
+    for SUB in liste_sujets:
+        ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, randomize_flag)
 
-    if scores_r2 is not None:
-        ridge.brain_mapping_r2(scores_r2)
-        ridge.brain_mapping_alphas(alphas_tous_lots)
-        ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
+        if flag_opt_alphas:
+            # --- MODE OPTIMISATION : boucle adaptive sur la grille d'alphas ---
+            start_log, end_log = 5, 6
+            meilleur_r2_max = -np.inf
+            iteration = 1
 
+            while iteration <= max_iterations:
+                alphas = np.logspace(start_log, end_log, 20)
+                alpha_min_str = f"{alphas.min():.1e}"
+                alpha_max_str = f"{alphas.max():.1e}"
+                suffixe_fichier = f"_amin-{alpha_min_str}_amax-{alpha_max_str}"
+
+                print("-" * 113)
+                print(f"\n[Sujet: {SUB} | Iteration {iteration}] Test de la plage alphas : [{alpha_min_str} -> {alpha_max_str}]")
+
+                scores_r2, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
+
+                if scores_r2 is None:
+                    print(f" Echec de l'evaluation pour {SUB}. Passage au sujet suivant.")
+                    break
+
+                r2_max_actuel = np.max(scores_r2)
+                print(f" -> R2 max mesure a l'iteration {iteration} : {r2_max_actuel:.5f}")
+                ridge.brain_mapping_r2(scores_r2, suffix=suffixe_fichier)
+                ridge.brain_mapping_alphas(alphas_tous_lots, suffix=suffixe_fichier)
+                ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas, suffix=suffixe_fichier)
+
+                total_cibles = len(alphas_tous_lots)
+                n_borne_min = np.sum(alphas_tous_lots == alphas.min())
+                n_borne_max = np.sum(alphas_tous_lots == alphas.max())
+                seuil_saturation = 0.05 * total_cibles
+
+                gain_r2 = r2_max_actuel - meilleur_r2_max
+                if gain_r2 < tolerance_evolution:
+                    print(f" Convergence atteinte : gain R2 max = {gain_r2:.5f} < {tolerance_evolution}.")
+                    break
+
+                meilleur_r2_max = r2_max_actuel
+
+                if n_borne_max > seuil_saturation and n_borne_min <= seuil_saturation:
+                    print(f" -> Saturation haute ({n_borne_max}/{total_cibles} cibles). Decalage vers le haut.")
+                    start_log += 1
+                    end_log += 1
+                elif n_borne_min > seuil_saturation and n_borne_max <= seuil_saturation:
+                    print(f" -> Saturation basse ({n_borne_min}/{total_cibles} cibles). Decalage vers le bas.")
+                    start_log -= 1
+                    end_log -= 1
+                elif n_borne_max > seuil_saturation and n_borne_min > seuil_saturation:
+                    print(f" -> Double saturation. Elargissement global de la grille.")
+                    start_log -= 1
+                    end_log += 1
+                else:
+                    print(" -> Distribution optimale. Fin de la recherche.")
+                    break
+
+                iteration += 1
+
+            print(f" Fin de l'optimisation pour {SUB}. Meilleur R2 max : {meilleur_r2_max:.5f}\n")
+
+        else:
+            # --- MODE NORMAL : run unique avec la grille fixe ---
+            if flag_precision_voxel == False:    
+                if SUB == "sub-01":
+                    alphas = np.logspace(2, 7, 20)
+                elif SUB == "sub-02":
+                    alphas = np.logspace(1, 6, 20)
+                elif SUB == "sub-03":
+                    alphas = np.logspace(1, 4, 20)
+                else:
+                    alphas = np.logspace(2, 5, 20)
+            else:
+                if SUB == "sub-01":
+                    alphas = np.logspace(2, 9, 20)
+                elif SUB == "sub-02":
+                    alphas = np.logspace(1, 8, 20)
+                elif SUB == "sub-03":
+                    alphas = np.logspace(0, 7, 20)
+                else:
+                    alphas = np.logspace(2, 9, 20)
+
+            scores_r2, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
+
+            if scores_r2 is not None:
+                ridge.brain_mapping_r2(scores_r2)
+                ridge.brain_mapping_alphas(alphas_tous_lots)
+                ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)

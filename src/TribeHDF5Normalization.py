@@ -48,12 +48,12 @@ class TribeHDF5Normalization:
         ]
         resultat = subprocess.run(commande_metadata_video, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         duree_reelle = float(resultat.stdout.strip())
-        print(f"[Info] Durée lue par ffprobe : {duree_reelle} secondes")
+        #print(f"[Info] Durée lue par ffprobe : {duree_reelle} secondes")
         return duree_reelle
 
     def executer_pipeline(self,tribe_hdf5=None, cneuromod_hdf5=None):
         """Exécute l'intégralité du pipeline de nettoyage et d'alignement."""
-        print("[Traitement en cours] Ouverture des fichiers HDF5...")
+        #print("[Traitement en cours] Ouverture des fichiers HDF5...")
 
         gere_localement = tribe_hdf5 is None and cneuromod_hdf5 is None
 
@@ -65,20 +65,20 @@ class TribeHDF5Normalization:
             # 1. Extraction Cneuromod (Cible Y) avec clés dynamiques
             dataset_cneuromod = cneuromod_hdf5[self.cneuromod_ses][self.cneuromod_dataset][:]
             self.Y_cible = dataset_cneuromod
-            print(f"Dataset Cneuromod (Y) : {self.Y_cible.shape}")
+            #print(f"Dataset Cneuromod (Y) : {self.Y_cible.shape}")
 
             # 2. Extraction et Aplatissement Tribe
             dataset_tribe = tribe_hdf5[self.tribe_ses][self.tribe_run][self.tribe_layer]
-            print(f"Dataset Tribe origin : {dataset_tribe.shape}")
+            #print(f"Dataset Tribe origin : {dataset_tribe.shape}")
 
             dataset_tribe_concatene = dataset_tribe[:].reshape(-1, 1152)
-            print(f"Dataset Tribe concatene : {dataset_tribe_concatene.shape}")
+            #print(f"Dataset Tribe concatene : {dataset_tribe_concatene.shape}")
 
             # 3. Nettoyage Temporel (Coup de ciseaux)
             duree_reelle = self._obtenir_duree_video()
             nb_instants_valides = int(duree_reelle / self.t_Tribe_s)
             dataset_tribe_bonne_duree = dataset_tribe_concatene[:nb_instants_valides, :]
-            print(f"Dataset Tribe nettoyé du padding : {dataset_tribe_bonne_duree.shape}")
+            #print(f"Dataset Tribe nettoyé du padding : {dataset_tribe_bonne_duree.shape}")
 
             if self.flag_delai_bold_brute == True:
                 if self.centrage_donne_temps == True:
@@ -118,7 +118,7 @@ class TribeHDF5Normalization:
             self.X_aligne = self.X_aligne.astype(np.float32)
             self.Y_cible = self.Y_cible.astype(np.float32)
 
-            print(f"X (Tribe) : {self.X_aligne.shape} == Y (Cneuromod) : {self.Y_cible.shape}")
+            #print(f"X (Tribe) : {self.X_aligne.shape} == Y (Cneuromod) : {self.Y_cible.shape}")
 
         finally:
             if gere_localement:
