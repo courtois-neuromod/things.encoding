@@ -192,7 +192,7 @@ class RidgeRegression:
                         break
 
                 Y_list = [Y_list[i] for i in nouvel_ordre]
-                print(f"⚠Baseline activée : Y_list réordonné aléatoirement ({nombre_de_runs} runs, aucun n'a gardé sa position d'origine)")
+                print(f"⚠ Baseline activée : Y_list réordonné aléatoirement ({nombre_de_runs} runs, aucun n'a gardé sa position d'origine)")
 
             X = np.concatenate(X_list, axis=0)
             Y = np.concatenate(Y_list, axis=0)
@@ -204,38 +204,37 @@ class RidgeRegression:
 
             return runs_ok, X, Y, groupes
 
-    def ridge_regression(self, PCA_flag, alphas, X_train, Y_train, X_test, Y_test,taille_lot=5000):
-        # 2. Standardisation
+    def ridge_regression(self, PCA_flag, alphas, X_train, Y_train, X_test, Y_test, taille_lot=5000, alphas_finaux=None):
         scaler_X = StandardScaler()
         scaler_Y = StandardScaler()
 
         X_train_scaled = scaler_X.fit_transform(X_train)
         Y_train_scaled = scaler_Y.fit_transform(Y_train)
-        #Y_train_scaled = Y_train
         X_test_scaled = scaler_X.transform(X_test)
         Y_test_scaled = scaler_Y.transform(Y_test)
-        #Y_test_scaled = Y_test
 
         if PCA_flag:
-            pca = PCA(n_components=0.95)  # garde 95% de la variance
+            pca = PCA(n_components=0.95)
             X_train_scaled = pca.fit_transform(X_train_scaled)
             X_test_scaled = pca.transform(X_test_scaled)
             print(f"      [PCA] Dimensions réduites de {X_train.shape[1]} à {X_train_scaled.shape[1]}")
 
         n_cibles = Y_train_scaled.shape[1]
         scores_r2 = np.zeros(n_cibles, dtype=np.float32)
-
-        # Accumulateurs pour le diagnostic global des alphas (sur tous les lots)
         alphas_tous_lots = np.zeros(n_cibles, dtype=np.float64)
-
         n_lots = int(np.ceil(n_cibles / taille_lot))
 
         for i, debut in enumerate(range(0, n_cibles, taille_lot)):
             fin = min(debut + taille_lot, n_cibles)
 
-            modele = RidgeCV(alphas=alphas, alpha_per_target=True)
-            modele.fit(X_train_scaled, Y_train_scaled[:, debut:fin])
+            # Mode évaluation finale : alphas fixés, pas de recherche
+            if alphas_finaux is not None:
+                grille = np.unique(alphas_finaux[debut:fin])
+            else:
+                grille = alphas
 
+            modele = RidgeCV(alphas=grille, alpha_per_target=True)
+            modele.fit(X_train_scaled, Y_train_scaled[:, debut:fin])
             alphas_tous_lots[debut:fin] = modele.alpha_
 
             Y_pred_lot = modele.predict(X_test_scaled)
@@ -249,26 +248,17 @@ class RidgeRegression:
             if i % 5 == 0 or i == n_lots - 1:
                 print(f"      [Ridge] Lot {i + 1}/{n_lots} traité (cibles {debut}-{fin})")
 
-        # --- Diagnostic : où se situent les alphas optimaux ? ---
+        # Diagnostic alphas (utile surtout en mode CV)
         print(f"[Diagnostic alphas] min={alphas_tous_lots.min():.2e}, "
               f"max={alphas_tous_lots.max():.2e}, "
               f"médiane={np.median(alphas_tous_lots):.2e}")
-
-        # Combien de cibles ont choisi les bornes extrêmes de ta grille ?
-        n_borne_min = np.sum(alphas_tous_lots == alphas.min())
-        n_borne_max = np.sum(alphas_tous_lots == alphas.max())
-        print(f"[Diagnostic alphas] {n_borne_min}/{len(alphas_tous_lots)} cibles à la borne MIN "
-              f"({alphas.min():.2e}), {n_borne_max}/{len(alphas_tous_lots)} à la borne MAX "
-              f"({alphas.max():.2e})")
-        # ----------------------------------------------------------
 
         del X_train_scaled, X_test_scaled
         gc.collect()
 
         return scores_r2, alphas_tous_lots
 
-
-    def cross_validation(self, mode, cv_type, alphas, PCA_flag):
+    def cross_validation(self, mode, cv_type, alphas, PCA_flag, alphas_finaux_optimises=None):
         if mode == "train":
             if cv_type == "LeaveOneGroupOut":
                 logo = LeaveOneGroupOut()
@@ -283,13 +273,20 @@ class RidgeRegression:
 
                 scores_tous_les_folds = []
                 alphas_tous_les_folds = []
-                for index_fold, (train_index, test_index) in enumerate(logo.split(X, Y, groupes)):
+                session_non_utilise = [13,17]
+                session_evaluation = [14,15,16]
+                for index_fold, (train_index, valide_index) in enumerate(logo.split(X, Y, groupes)):
+                    session_du_fold = np.unique(groupes[valide_index])[0]
+
+                    if session_du_fold in session_non_utilise + session_evaluation:
+                        continue
+
                     print(f"\n--- Évaluation du Fold {index_fold + 1}/{n_folds} ---")
 
-                    X_train, X_test = X[train_index], X[test_index]
-                    Y_train, Y_test = Y[train_index], Y[test_index]
+                    X_train, X_valide = X[train_index], X[valide_index]
+                    Y_train, Y_valide = Y[train_index], Y[valide_index]
 
-                    scores_fold, alphas_fold = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_test, Y_test)
+                    scores_fold, alphas_fold = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_valide, Y_valide)
                     scores_tous_les_folds.append(scores_fold)
                     alphas_tous_les_folds.append(alphas_fold)
                     print(f"    -> R² max sur ce fold : {np.max(scores_fold):.5f}")
@@ -310,25 +307,60 @@ class RidgeRegression:
                     return None, None
 
                 train_sessions = list(range(1, 13)) + list(range(18, 37))
-                test_sessions = [14, 15, 16]
+                valide_sessions = 2
 
                 train_mask = np.isin(groupes, train_sessions)
-                test_mask = np.isin(groupes, test_sessions)
+                valide_mask = np.isin(groupes, valide_sessions)
 
                 X_train, Y_train = X[train_mask], Y[train_mask]
-                X_test, Y_test = X[test_mask], Y[test_mask]
+                X_valide, Y_valide = X[valide_mask], Y[valide_mask]
 
                 print(f"\n[Évaluation Custom] Mémorisation (Train) : Sessions {train_sessions}")
-                print(f"                    Prédiction (Test)  : Sessions {test_sessions}")
+                print(f"                    Prédiction (Test)  : Sessions {valide_sessions}")
                 print(f"                    Ignorées (Gaps)    : Sessions 13 et 17")
-                print(f"--- Dimensions | Train : {X_train.shape[0]} TRs | Test : {X_test.shape[0]} TRs ---")
+                print(f"--- Dimensions | Train : {X_train.shape[0]} TRs | Test : {X_valide.shape[0]} TRs ---")
 
-                scores_finaux, alphas_finaux = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_test, Y_test)
+                scores_finaux, alphas_finaux = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_valide, Y_valide)
 
                 del X, Y, groupes
 
                 return scores_finaux, [scores_finaux], alphas_finaux, [alphas_finaux]
-        return None, None
+        else:
+            if alphas_finaux_optimises is None:
+                raise ValueError("En mode test, les alphas doivent être fournis")
+
+            runs_ok, X, Y, groupes = self.prepare_X_and_Y()
+            if len(X) == 0 or len(Y) == 0:
+                raise ValueError("Erreur X ou Y ne contient rien ")
+
+            session_non_utilise = [13, 17]
+            session_evaluation = [14, 15, 16]
+            test_mask = np.isin(groupes, session_evaluation)
+            train_mask = ~np.isin(groupes, session_evaluation + session_non_utilise)
+
+            X_train_final, Y_train_final = X[train_mask], Y[train_mask]
+            X_test_final, Y_test_final = X[test_mask], Y[test_mask]
+
+            print(f"\n[Évaluation Finale STRICTE]")
+            print(
+                f"--- Entraînement final sur {len(np.unique(groupes[train_mask]))} sessions ({X_train_final.shape[0]} TRs) ---")
+            print(f"--- Test pur sur sessions {session_evaluation} ({X_test_final.shape[0]} TRs) ---")
+
+            # Appel de la Ridge avec les alphas fixés
+            scores_finaux, alphas_utilises = self.ridge_regression(
+                PCA_flag=PCA_flag,
+                alphas=None,  # La grille n'est plus explorée
+                X_train=X_train_final,
+                Y_train=Y_train_final,
+                X_test=X_test_final,
+                Y_test=Y_test_final,
+                alphas_finaux=alphas_finaux_optimises  # On force les alphas
+            )
+
+            del X, Y, groupes
+            return scores_finaux, [scores_finaux], alphas_utilises, [alphas_utilises]
+
+
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
         unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
@@ -494,8 +526,8 @@ if __name__ == "__main__":
     randomize_flag = False
     flag_opt_alphas = False
     ROImask_flag = True
-
-    mode = "train"
+    mode = ["train", "test"]
+    mode = mode[0]
     cv_type = "CustomHoldout"
     PCA_flag = False
 
@@ -523,8 +555,7 @@ if __name__ == "__main__":
                 print("-" * 113)
                 print(f"\n[Sujet: {SUB} | Iteration {iteration}] Test de la plage alphas : [{alpha_min_str} -> {alpha_max_str}]")
 
-                scores_r2, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
-
+                scores_r2, scores_tous_les_folds, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation("train", cv_type, alphas, PCA_flag)
                 if scores_r2 is None:
                     print(f" Echec de l'evaluation pour {SUB}. Passage au sujet suivant.")
                     break
@@ -568,31 +599,72 @@ if __name__ == "__main__":
             print(f" Fin de l'optimisation pour {SUB}. Meilleur R2 max : {meilleur_r2_max:.5f}\n")
 
         else:
-            # --- MODE NORMAL : run unique avec la grille fixe ---
-            if flag_precision_voxel == False:    
-                if SUB == "sub-01":
-                    alphas = np.logspace(2, 7, 20)
-                elif SUB == "sub-02":
-                    alphas = np.logspace(1, 6, 20)
-                elif SUB == "sub-03":
-                    alphas = np.logspace(1, 4, 20)
+            if mode == "test":
+                # --- MODE NORMAL : run unique avec la grille fixe ---
+                if flag_precision_voxel == False:
+                    if SUB == "sub-01":
+                        alphas = np.logspace(2, 7, 20)
+                    elif SUB == "sub-02":
+                        alphas = np.logspace(1, 6, 20)
+                    elif SUB == "sub-03":
+                        alphas = np.logspace(1, 4, 20)
+                    else:
+                        alphas = np.logspace(2, 5, 20)
                 else:
-                    alphas = np.logspace(2, 5, 20)
+                    if SUB == "sub-01":
+                        alphas = np.logspace(2, 9, 20)
+                    elif SUB == "sub-02":
+                        alphas = np.logspace(1, 8, 20)
+                    elif SUB == "sub-03":
+                        alphas = np.logspace(0, 7, 20)
+                    else:
+                        alphas = np.logspace(2, 9, 20)
+
+                scores_train, scores_tous_les_folds, alphas_optimaux, alphas_tous_les_folds = ridge.cross_validation("train", cv_type, alphas, PCA_flag)
+
+                print(f"\n{'=' * 50}")
+                print(f"ÉTAPE 2 : ÉVALUATION FINALE STRICTE (TEST)")
+                print(f"{'=' * 50}")
+
+                # Lancement exclusif en mode "test" en injectant les alphas trouvés
+                scores_test, _, alphas_utilises, alphas_utilises_liste = ridge.cross_validation(
+                    mode="test",
+                    cv_type=cv_type,
+                    alphas=None,
+                    PCA_flag=PCA_flag,
+                    alphas_finaux_optimises=alphas_optimaux
+                )
+
+                if scores_test is not None:
+                    ridge.brain_mapping_r2(scores_test)
+                    ridge.brain_mapping_alphas(alphas_utilises,)
+                    ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
+                    ridge.plot_ROImask_histogram(scores_test, liste_ROI)
             else:
-                if SUB == "sub-01":
-                    alphas = np.logspace(2, 9, 20)
-                elif SUB == "sub-02":
-                    alphas = np.logspace(1, 8, 20)
-                elif SUB == "sub-03":
-                    alphas = np.logspace(0, 7, 20)
+                if flag_precision_voxel == False:
+                    if SUB == "sub-01":
+                        alphas = np.logspace(2, 7, 20)
+                    elif SUB == "sub-02":
+                        alphas = np.logspace(1, 6, 20)
+                    elif SUB == "sub-03":
+                        alphas = np.logspace(1, 4, 20)
+                    else:
+                        alphas = np.logspace(2, 5, 20)
                 else:
-                    alphas = np.logspace(2, 9, 20)
+                    if SUB == "sub-01":
+                        alphas = np.logspace(2, 9, 20)
+                    elif SUB == "sub-02":
+                        alphas = np.logspace(1, 8, 20)
+                    elif SUB == "sub-03":
+                        alphas = np.logspace(0, 7, 20)
+                    else:
+                        alphas = np.logspace(2, 9, 20)
 
-            scores_r2, scores_tous_les_folds, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
+                scores_train, scores_tous_les_folds, alphas_optimaux, alphas_tous_les_folds = ridge.cross_validation("train", cv_type, alphas, PCA_flag)
 
-            if scores_r2 is not None:
-                ridge.brain_mapping_r2(scores_r2)
-                ridge.brain_mapping_alphas(alphas_tous_lots)
-                ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
-                ridge.plot_ROImask_histogram(scores_r2, liste_ROI)
+                if scores_train is not None:
+                    ridge.brain_mapping_r2(scores_train)
+                    ridge.brain_mapping_alphas(alphas_optimaux,)
+                    ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
+                    ridge.plot_ROImask_histogram(scores_train, liste_ROI)
 
