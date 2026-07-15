@@ -427,15 +427,15 @@ class RidgeRegression:
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
         donnees_affichees = np.log10(donnees) if echelle_log else donnees
+        coords_R2_map = {'x': np.array([-52.5, -28.5, -12.5, 9.5, 21.5, 35.5, 47.5]), 'y': np.array([-96.5, -80.5, -60.5, -42.5, -26.5, 53.5, 69.5]), 'z': np.array([-18.5, -4.5, 7.5, 19.5, 31.5, 45.5, 61.5])}
 
         if self.flag_precision_voxel == True:
             masker = NiftiMasker(mask_img=chemins.chemin_atlas, standardize=False)
-            kwargs_bg = {"bg_img": chemins.chemin_anatomie}
+            kwargs = {"bg_img": chemins.chemin_anatomie}
         else:
             masker = NiftiLabelsMasker(labels_img=chemins.chemin_atlas, standardize=False)
-            kwargs_bg = {}
+            kwargs = {"cut_coords": coords_R2_map}
 
-        coords_R2_map = {'x': np.array([-52.5, -28.5, -12.5, 9.5, 21.5, 35.5, 47.5]), 'y': np.array([-96.5, -80.5, -60.5, -42.5, -26.5, 53.5, 69.5]), 'z': np.array([-18.5, -4.5, 7.5, 19.5, 31.5, 45.5, 61.5])}
         masker.fit()
         r2_map_3d = masker.inverse_transform(donnees_affichees)
 
@@ -449,11 +449,10 @@ class RidgeRegression:
             vmax=vmax,
             symmetric_cbar=False,
             display_mode='mosaic',
-            cut_coords = coords_R2_map,
             cbar_tick_format="%.2f",
             colorbar=True,
             cmap=cmap,
-            **kwargs_bg,
+            **kwargs,
         )
         unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
         title=f'{nom_carte} pour {self.subject} - {self.layer} en {unite}'
@@ -483,7 +482,7 @@ if __name__ == "__main__":
 
     # --- PARAMÈTRES ---
     plateforme = ["Rorqual", "Mac"]
-    plateforme = plateforme[1]
+    plateforme = plateforme[0]
 
     liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
     liste_sujets = liste_sujets[2:3]
@@ -589,7 +588,7 @@ if __name__ == "__main__":
                 else:
                     alphas = np.logspace(2, 9, 20)
 
-            scores_r2, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
+            scores_r2, scores_tous_les_folds, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
 
             if scores_r2 is not None:
                 ridge.brain_mapping_r2(scores_r2)

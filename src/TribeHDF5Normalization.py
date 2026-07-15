@@ -48,8 +48,8 @@ class TribeHDF5Normalization:
         ]
         resultat = subprocess.run(commande_metadata_video, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         duree_reelle = float(resultat.stdout.strip())
-        #print(f"[Info] Durée lue par ffprobe : {duree_reelle} secondes")
-        return duree_reelle
+        print(f"[Info] Durée lue par ffprobe : {int(duree_reelle)} secondes")
+        return int(duree_reelle)
 
     def executer_pipeline(self,tribe_hdf5=None, cneuromod_hdf5=None):
         """Exécute l'intégralité du pipeline de nettoyage et d'alignement."""
@@ -84,7 +84,7 @@ class TribeHDF5Normalization:
                 if self.centrage_donne_temps == True:
                     temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s + self.t_Tribe_s / 2
                     temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s + self.TR_irmf_s / 2
-                    temps_cible_avec_delai_bold = temps_cible - 5
+                    temps_cible = temps_cible - 5
                 else:
                     temps_source = np.arange(dataset_tribe_bonne_duree.shape[0]) * self.t_Tribe_s
                     temps_cible = np.arange(self.Y_cible.shape[0]) * self.TR_irmf_s
@@ -109,7 +109,8 @@ class TribeHDF5Normalization:
             masque_valide = masque_debut & masque_fin
 
             # 5. Interpolation (L'alignement)
-            aligneur_temporel = interp1d(temps_source, dataset_tribe_propre, axis=0, bounds_error=False, fill_value=0.0)
+            # Test de kind='previous' qui permet de répéter la dernière valeur de l'embeddings jusqu'à ce qu'un nouveau soit généré (conseillé par la littérature)
+            aligneur_temporel = interp1d(temps_source, dataset_tribe_propre, kind='previous', axis=0, bounds_error=False, fill_value=0.0)
             self.X_aligne = aligneur_temporel(temps_cible)
 
             self.X_aligne = self.X_aligne[masque_valide]

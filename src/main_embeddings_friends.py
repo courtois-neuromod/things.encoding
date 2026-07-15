@@ -21,11 +21,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
     season = args.season
 
-    warnings.filterwarnings("ignore")
-    logging.disable(logging.CRITICAL)
+    #warnings.filterwarnings("ignore")
+    #logging.disable(logging.CRITICAL)
 
     plateforme = ['Rorqual', 'Mac']
-    plateforme = plateforme[1]
+    plateforme = plateforme[0]
 
     if plateforme == "Rorqual":
         ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
@@ -36,13 +36,17 @@ if __name__ == '__main__':
 
     DATA_DIR = ROOT_STIMULI
     HDF5_DIR = ROOT_ENCODING / "output" / "hdf5" / "friends"
-
+    
+    t0 = time.time()
     config = Config(
         plateforme=plateforme,
     )
     config.charger_env()
-
+    print(f"charger_env: {time.time()-t0:.1f}s", flush=True)
+    
+    t0 = time.time()
     model = config.charger_modele()
+    print(f"charger_modele: {time.time()-t0:.1f}s", flush=True)
     fmri_enc = model.__pydantic_private__['_model']
 
     writer = HDF5Writer(HDF5_DIR)
