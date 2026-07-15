@@ -48,7 +48,7 @@ class RidgeRegression:
 
 
     def get_path_file_by_plateform(self, plateforme):
-        if plateforme == "Roquale":
+        if plateforme == "Rorqual":
             ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
             ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
         else:
@@ -76,7 +76,7 @@ class RidgeRegression:
             "tpl-MNI152NLin2009cAsym_atlas-Schaefer2018TianS3NettekovenAsym_"
             "desc-1000Parcels7Networks50Subcort128Cereb_parcelAnnotations.tsv"
         )
-        if plateforme == "Roquale":
+        if plateforme == "Rorqual":
             ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
             return ROOT_ENCODING / "data" / "brain_map_subj" / nom_fichier_annotations
         else:
@@ -114,7 +114,7 @@ class RidgeRegression:
 
                     # Chemin vidéo originale (non CFR) pour ffprobe
                     nom_video = f"{self.subject}_{tribe_ses}_task-thingsmemory_{tribe_run}.mp4"
-                    if self.plateforme == "Roquale":
+                    if self.plateforme == "Rorqual":
                         chemin_video = chemins.root_encoding / "data" / "data" / self.subject / tribe_ses / nom_video
                     else:
                         chemin_video = chemins.root_encoding / "data" / self.subject / tribe_ses / nom_video
@@ -482,7 +482,7 @@ class RidgeRegression:
 if __name__ == "__main__":
 
     # --- PARAMÈTRES ---
-    plateforme = ["Roquale", "Mac"]
+    plateforme = ["Rorqual", "Mac"]
     plateforme = plateforme[1]
 
     liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
@@ -500,24 +500,12 @@ if __name__ == "__main__":
     cv_type = "CustomHoldout"
     PCA_flag = False
 
-    liste_ROI = ["faceFFA","scenePPA", "bodyEBA", "V1", "V2", "V3", "hv4"]
+    liste_ROI = ["faceFFA","scenePPA", "bodyEBA", "V1", "V2", "V3", "hv4", "dorsalAttention", "ventralAttention", "visual" ]
 
     # Paramètres de la boucle d'optimisation adaptative
     max_iterations = 100
     tolerance_evolution = 1e-4
 
-    alphas = np.logspace(1, 4, 20)
-
-    ridge = RidgeRegression(plateforme, liste_sujets[0], LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel,
-                            ROImask_flag, randomize_flag)
-    scores_r2, scores_r2_tousl_les_folds, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation(mode, cv_type, alphas, PCA_flag)
-    ridge.plot_ROImask_histogram(scores_r2, liste_ROI)
-    ridge.brain_mapping_r2(scores_r2)
-    ridge.brain_mapping_alphas(alphas_tous_lots)
-    ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
-
-
-"""
     for SUB in liste_sujets:
         ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, ROImask_flag, randomize_flag)
 
@@ -607,4 +595,5 @@ if __name__ == "__main__":
                 ridge.brain_mapping_r2(scores_r2)
                 ridge.brain_mapping_alphas(alphas_tous_lots)
                 ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
-"""
+                ridge.plot_ROImask_histogram(scores_r2, liste_ROI)
+

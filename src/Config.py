@@ -20,7 +20,7 @@ class Config():
             print("Mode offline : login HuggingFace ignoré, utilisation du cache.")
 
     def charger_modele(self):
-        if self.plateforme == 'macos':
+        if self.plateforme == ('Mac'):
             self.model = TribeModel.from_pretrained(
                 "facebook/tribev2",
                 cache_folder="./cache",
