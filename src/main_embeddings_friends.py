@@ -45,7 +45,7 @@ if __name__ == '__main__':
     fmri_enc = model.__pydantic_private__['_model']
 
     writer = HDF5Writer(HDF5_DIR)
-    video_files = sorted(DATA_DIR.glob(f"friends_s{season:02d}e*.mkv"))
+    video_files = sorted(DATA_DIR.glob(f"friends_s{season:02d}e*[abc].mkv"))
     print(f"Saison {season} --> {len(video_files)} vidéos trouvées")
     """
 for video_path in video_files:

@@ -395,7 +395,7 @@ class RidgeRegression:
                 df = pd.DataFrame({"ROI": ROIs_noms, "r2": ROIs_vecteur})
                 print(df.shape)
 
-                fig = px.box(df, x="ROI", y="r2", color="ROI", points=False)
+                fig = px.box(df, x="ROI", y="r2", color="ROI", points="all")
                 fig.write_html(str(chemins.root_encoding / "output" / f"ROImask_{self.subject}.html"))
             print("Histogramme ROI sauvegardé :", str(chemins.root_encoding / "output" / f"ROImask_{self.subject}.html"))
             return
@@ -527,8 +527,8 @@ if __name__ == "__main__":
     flag_opt_alphas = False
     ROImask_flag = True
     mode = ["train", "test"]
-    mode = mode[0]
-    cv_type = "CustomHoldout"
+    mode = mode[1]
+    cv_type = "LeaveOneGroupOut"
     PCA_flag = False
 
     liste_ROI = ["faceFFA","scenePPA", "bodyEBA", "V1", "V2", "V3", "hv4", "dorsalAttention", "ventralAttention", "visual" ]
