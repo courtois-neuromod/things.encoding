@@ -127,7 +127,7 @@ class RidgeRegression:
         print(f"{len(runs)} runs trouvés dans {chemins.chemin_tribe.name}")
         return runs
 
-    def prepare_X_and_Y(self,):
+    def create_X_Y_total(self, ):
 
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
@@ -204,85 +204,15 @@ class RidgeRegression:
 
             return runs_ok, X, Y, groupes
 
-    def cross_validation(self, alphas, taille_lot = 5000):
-
-        runs_ok, X, Y, groupes = self.prepare_X_and_Y()
-
-        # Masque : on exclut les sessions réservées au test final et les gaps
-        sessions_a_exclure = [13, 14, 15, 16, 17]
+    def _selection_X_Y(self, sessions_a_exclure):
+        runs_ok, X, Y, groupes = self.create_X_Y_total()
         masque = ~np.isin(groupes, sessions_a_exclure)
         X, Y, groupes = X[masque], Y[masque], groupes[masque]
+        return X, Y, groupes
 
-        sessions = np.unique(groupes)
-        n_features = Y.shape[1]
-        n_folds = len(sessions)
-
-        r2_fold = np.zeros((n_folds, n_features), dtype=np.float32)
-        alphas_fold = np.zeros((n_folds, n_features), dtype=np.float64)
-
-        for index_fold, session_test in enumerate(sessions):
-
-            train_mask = groupes != session_test
-            test_mask = groupes == session_test
-
-            X_train, X_test = X[train_mask], X[test_mask]
-            Y_train, Y_test = Y[train_mask], Y[test_mask]
-
-            scaler_X = StandardScaler()
-            X_scaled_train = scaler_X.fit_transform(X_train)
-            X_scaled_test = scaler_X.transform(X_test)
-
-            scaler_Y = StandardScaler()
-            Y_scaled_train = scaler_Y.fit_transform(Y_train)
-            Y_scaled_test = scaler_Y.transform(Y_test)
-
-            n_lots = int(np.ceil(n_features/ taille_lot))
-            for index_lot, debut in enumerate(range(0, n_features, taille_lot)):
-
-                fin = min(debut + taille_lot, n_features)
-
-                # Boucle interne avec LOO analytique
-                modele = RidgeCV(
-                    alphas=alphas,
-                    alpha_per_target=True,
-                    cv=None, #LOO activé
-                    fit_intercept=True,
-                )
-
-                modele.fit(X_scaled_train, Y_scaled_train[:, debut:fin])
-
-                # Evaluation sur le fold test
-                Y_pred = modele.predict(X_scaled_test)
-
-                r2_fold[index_fold, debut:fin] = r2_score(Y_scaled_test[:, debut:fin], Y_pred, multioutput="raw_values")
-                alphas_fold[index_fold, debut:fin] = modele.alpha_
-
-                del modele, Y_pred
-                gc.collect()
-
-                if index_lot % 10 == 0:
-                    print(f"  Fold {index_fold + 1}/{n_folds} | lot {index_lot + 1}/{n_lots}")
-                    print(f"      R2 max -> {np.max(r2_fold[index_fold, debut:fin]):.5f}")
-
-            print(f"  Session {session_test:02d} en test → R² max : {np.max(r2_fold[index_fold]):.5f}")
-
-        scores_r2_finaux = np.mean(r2_fold, axis=0)
-        alphas_finaux = 10 ** np.mean(np.log10(alphas_fold), axis=0)
-
-        return scores_r2_finaux, r2_fold, alphas_finaux, alphas_fold
-
-    def evaluation_finale(self, alphas_optimaux, taille_lot = 5000):
-        runs_ok, X, Y, groupes = self.prepare_X_and_Y()
-
-        # Masque : on exclut les sessions réservées au test final et les gaps
-        sessions_exclues = [13, 17]
-        sessions_evaluation = [14, 15, 16]
-
-        train_masque = ~np.isin(groupes, sessions_exclues + sessions_evaluation)
-        test_masque = np.isin(groupes, sessions_evaluation)
-
-        X_train, X_test = X[train_masque], X[test_masque]
-        Y_train, Y_test = Y[train_masque], Y[test_masque]
+    def _scaler_X_Y(self, X, Y, train_mask, test_mask):
+        X_train, X_test = X[train_mask], X[test_mask]
+        Y_train, Y_test = Y[train_mask], Y[test_mask]
 
         scaler_X = StandardScaler()
         X_scaled_train = scaler_X.fit_transform(X_train)
@@ -291,19 +221,23 @@ class RidgeRegression:
         scaler_Y = StandardScaler()
         Y_scaled_train = scaler_Y.fit_transform(Y_train)
         Y_scaled_test = scaler_Y.transform(Y_test)
+        return X_scaled_train, X_scaled_test, Y_scaled_train, Y_scaled_test
 
-        print(f"Train : {X_train.shape[0]} TRs | Test : {X_test.shape[0]} TRs")
-
-        n_features = Y.shape[1]
+    def _ridge_par_lots(self, X_scaled_train, X_scaled_test, Y_scaled_train, Y_scaled_test,alphas, taille_lot, n_folds=None, index_fold=None):
+        n_features = Y_scaled_train.shape[1]
         n_lots = int(np.ceil(n_features / taille_lot))
-        r2_final = np.zeros(n_features, dtype=np.float32)
-        alphas_utilises = np.zeros(n_features, dtype=np.float32)
+
+        r2_lots = np.zeros(n_features, dtype=np.float32)
+        alphas_lots = np.zeros(n_features, dtype=np.float64)
 
         for index_lot, debut in enumerate(range(0, n_features, taille_lot)):
 
             fin = min(debut + taille_lot, n_features)
 
-            grille_alphas_lot = np.unique(alphas_optimaux[debut:fin])
+            if alphas.shape[0] == n_features:
+                grille_alphas_lot = np.unique(alphas[debut:fin])
+            else:
+                grille_alphas_lot = alphas
 
             # Boucle interne avec LOO analytique
             modele = RidgeCV(
@@ -318,10 +252,64 @@ class RidgeRegression:
             # Evaluation sur le fold test
             Y_pred = modele.predict(X_scaled_test)
 
-            r2_final[debut:fin] = r2_score(Y_scaled_test[:, debut:fin], Y_pred, multioutput="raw_values")
-            alphas_utilises[debut:fin] = modele.alpha_
+            r2_lots[debut:fin] = r2_score(Y_scaled_test[:, debut:fin], Y_pred, multioutput="raw_values")
+            alphas_lots[debut:fin] = modele.alpha_
             del modele, Y_pred
             gc.collect()
+
+        return r2_lots, alphas_lots
+
+    def cross_validation(self, alphas, taille_lot = 5000):
+
+        # Masque : on exclut les sessions réservées au test final et les gaps
+        sessions_a_exclure = [13, 14, 15, 16, 17]
+        X, Y, groupes = self._selection_X_Y(sessions_a_exclure)
+
+        sessions = np.unique(groupes)
+        n_features = Y.shape[1]
+        n_folds = len(sessions)
+
+        r2_fold = np.zeros((n_folds, n_features), dtype=np.float32)
+        alphas_fold = np.zeros((n_folds, n_features), dtype=np.float64)
+
+        for index_fold, session_test in enumerate(sessions):
+
+            train_mask = groupes != session_test
+            test_mask = groupes == session_test
+
+            X_scaled_train, X_scaled_test, Y_scaled_train, Y_scaled_test = self._scaler_X_Y(X, Y, train_mask, test_mask)
+
+            r2_fold[index_fold], alphas_fold[index_fold] = self._ridge_par_lots(
+                X_scaled_train, X_scaled_test, Y_scaled_train, Y_scaled_test,
+                alphas=alphas, taille_lot=taille_lot,
+                n_folds=n_folds, index_fold=index_fold,
+            )
+
+            print(f"  Fold {index_fold} Session {session_test:02d} en test → R² max : {np.max(r2_fold[index_fold]):.5f}")
+
+        scores_r2_finaux = np.mean(r2_fold, axis=0)
+        alphas_finaux = 10 ** np.mean(np.log10(alphas_fold), axis=0)
+
+        return scores_r2_finaux, r2_fold, alphas_finaux, alphas_fold
+
+    def evaluation_finale(self, alphas_optimaux, taille_lot = 5000):
+        # Masque : on exclut les sessions réservées au test final et les gaps
+        sessions_exclues = [13, 17]
+        sessions_evaluation = [14, 15, 16]
+
+        X, Y, groupes = self._selection_X_Y(sessions_exclues)
+
+        train_masque = ~np.isin(groupes, sessions_evaluation)
+        test_masque = np.isin(groupes, sessions_evaluation)
+
+        X_scaled_train, X_scaled_test, Y_scaled_train, Y_scaled_test = self._scaler_X_Y(X, Y, train_masque, test_masque)
+
+        print(f"Train : {X_scaled_train.shape[0]} TRs | Test : {X_scaled_test.shape[0]} TRs")
+
+        r2_final, alphas_utilises = self._ridge_par_lots(
+            X_scaled_train, X_scaled_test, Y_scaled_train, Y_scaled_test,
+            alphas=alphas_optimaux, taille_lot=taille_lot,
+        )
 
         return r2_final, alphas_utilises
 
