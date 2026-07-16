@@ -6,13 +6,13 @@ from pathlib import Path
 from TribeHDF5Normalization import TribeHDF5Normalization
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV
-from sklearn.metrics import r2_score
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import make_scorer, r2_score
+from sklearn.model_selection import LeaveOneGroupOut, cross_validate
 import numpy as np
 import pandas as pd
 import h5py
 import gc
-from sklearn.model_selection import LeaveOneGroupOut
-from sklearn.decomposition import PCA
 from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
 from nilearn.plotting import plot_stat_map
 import matplotlib
@@ -204,161 +204,52 @@ class RidgeRegression:
 
             return runs_ok, X, Y, groupes
 
-    def ridge_regression(self, PCA_flag, alphas, X_train, Y_train, X_test, Y_test, taille_lot=5000, alphas_finaux=None):
-        scaler_X = StandardScaler()
-        scaler_Y = StandardScaler()
+    def cross_validation(self, alphas):
 
-        X_train_scaled = scaler_X.fit_transform(X_train)
-        Y_train_scaled = scaler_Y.fit_transform(Y_train)
-        X_test_scaled = scaler_X.transform(X_test)
-        Y_test_scaled = scaler_Y.transform(Y_test)
+        runs_ok, X, Y, groupes = self.prepare_X_and_Y()
 
-        if PCA_flag:
-            pca = PCA(n_components=0.95)
-            X_train_scaled = pca.fit_transform(X_train_scaled)
-            X_test_scaled = pca.transform(X_test_scaled)
-            print(f"      [PCA] Dimensions réduites de {X_train.shape[1]} à {X_train_scaled.shape[1]}")
+        # Masque : on exclut les sessions réservées au test final et les gaps
+        sessions_a_exclure = [13, 14, 15, 16, 17]
+        masque = ~np.isin(groupes, sessions_a_exclure)
+        X, Y, groupes = X[masque], Y[masque], groupes[masque]
 
-        n_cibles = Y_train_scaled.shape[1]
-        scores_r2 = np.zeros(n_cibles, dtype=np.float32)
-        alphas_tous_lots = np.zeros(n_cibles, dtype=np.float64)
-        n_lots = int(np.ceil(n_cibles / taille_lot))
-
-        for i, debut in enumerate(range(0, n_cibles, taille_lot)):
-            fin = min(debut + taille_lot, n_cibles)
-
-            # Mode évaluation finale : alphas fixés, pas de recherche
-            if alphas_finaux is not None:
-                grille = np.unique(alphas_finaux[debut:fin])
-            else:
-                grille = alphas
-
-            modele = RidgeCV(alphas=grille, alpha_per_target=True)
-            modele.fit(X_train_scaled, Y_train_scaled[:, debut:fin])
-            alphas_tous_lots[debut:fin] = modele.alpha_
-
-            Y_pred_lot = modele.predict(X_test_scaled)
-            scores_r2[debut:fin] = r2_score(
-                Y_test_scaled[:, debut:fin], Y_pred_lot, multioutput="raw_values"
+        # Boucle interne : RidgeCV choisit l'alpha par LOO analytique
+        estimateur = make_pipeline(
+            StandardScaler(),
+            RidgeCV(
+                alphas=alphas,
+                alpha_per_target=True,
+                cv=None,  # LOO analytique interne
+                fit_intercept=True,
             )
+        )
 
-            del modele, Y_pred_lot
-            gc.collect()
+        # Boucle externe : LeaveOneGroupOut mesure R²
+        outer_cv = LeaveOneGroupOut()
 
-            if i % 5 == 0 or i == n_lots - 1:
-                print(f"      [Ridge] Lot {i + 1}/{n_lots} traité (cibles {debut}-{fin})")
+        scores = cross_validate(
+            estimateur,
+            X, Y,
+            cv=outer_cv,
+            groups=groupes,
+            scoring={
+                "r2": make_scorer(r2_score, multioutput="raw_values"),
+                "pearson": make_scorer(pearson_r_columnwise),
+            },
+            return_estimator=True,
+            n_jobs=-1,
+        )
 
-        # Diagnostic alphas (utile surtout en mode CV)
-        print(f"[Diagnostic alphas] min={alphas_tous_lots.min():.2e}, "
-              f"max={alphas_tous_lots.max():.2e}, "
-              f"médiane={np.median(alphas_tous_lots):.2e}")
+        # Résultats
+        scores_r2_finaux = np.mean(scores["test_r2"], axis=0)
 
-        del X_train_scaled, X_test_scaled
-        gc.collect()
+        alphas_tous_folds = [
+            est.named_steps["ridgecv"].alpha_
+            for est in scores["estimator"]
+        ]
+        alphas_finaux = 10 ** np.mean(np.log10(alphas_tous_folds), axis=0)
 
-        return scores_r2, alphas_tous_lots
-
-    def cross_validation(self, mode, cv_type, alphas, PCA_flag, alphas_finaux_optimises=None):
-        if mode == "train":
-            if cv_type == "LeaveOneGroupOut":
-                logo = LeaveOneGroupOut()
-                runs_ok, X, Y, groupes = self.prepare_X_and_Y()
-
-                if len(X) == 0 or len(Y) == 0:
-                    print("Erreur X ou X ne contient rien ")
-                    return None, None
-
-                n_folds = len(np.unique(groupes))
-                print(f"\n[Validation Croisée] Lancement sur {n_folds} sessions (Test sur 1 session par fold)...")
-
-                scores_tous_les_folds = []
-                alphas_tous_les_folds = []
-                session_non_utilise = [13,17]
-                session_evaluation = [14,15,16]
-                for index_fold, (train_index, valide_index) in enumerate(logo.split(X, Y, groupes)):
-                    session_du_fold = np.unique(groupes[valide_index])[0]
-
-                    if session_du_fold in session_non_utilise + session_evaluation:
-                        continue
-
-                    print(f"\n--- Évaluation du Fold {index_fold + 1}/{n_folds} ---")
-
-                    X_train, X_valide = X[train_index], X[valide_index]
-                    Y_train, Y_valide = Y[train_index], Y[valide_index]
-
-                    scores_fold, alphas_fold = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_valide, Y_valide)
-                    scores_tous_les_folds.append(scores_fold)
-                    alphas_tous_les_folds.append(alphas_fold)
-                    print(f"    -> R² max sur ce fold : {np.max(scores_fold):.5f}")
-
-                scores_finaux = np.mean(scores_tous_les_folds, axis=0)
-                log_alphas = np.log10(alphas_tous_les_folds)
-                alphas_finaux = 10 ** np.mean(log_alphas, axis=0)
-
-                del X, Y, groupes
-
-                return scores_finaux, scores_tous_les_folds, alphas_finaux, alphas_tous_les_folds
-
-            elif cv_type == "CustomHoldout":
-                runs_ok, X, Y, groupes = self.prepare_X_and_Y()
-
-                if len(X) == 0 or len(Y) == 0:
-                    print("Erreur X ou X ne contient rien ")
-                    return None, None
-
-                train_sessions = list(range(1, 13)) + list(range(18, 37))
-                valide_sessions = 2
-
-                train_mask = np.isin(groupes, train_sessions)
-                valide_mask = np.isin(groupes, valide_sessions)
-
-                X_train, Y_train = X[train_mask], Y[train_mask]
-                X_valide, Y_valide = X[valide_mask], Y[valide_mask]
-
-                print(f"\n[Évaluation Custom] Mémorisation (Train) : Sessions {train_sessions}")
-                print(f"                    Prédiction (Test)  : Sessions {valide_sessions}")
-                print(f"                    Ignorées (Gaps)    : Sessions 13 et 17")
-                print(f"--- Dimensions | Train : {X_train.shape[0]} TRs | Test : {X_valide.shape[0]} TRs ---")
-
-                scores_finaux, alphas_finaux = self.ridge_regression(PCA_flag, alphas, X_train, Y_train, X_valide, Y_valide)
-
-                del X, Y, groupes
-
-                return scores_finaux, [scores_finaux], alphas_finaux, [alphas_finaux]
-        else:
-            if alphas_finaux_optimises is None:
-                raise ValueError("En mode test, les alphas doivent être fournis")
-
-            runs_ok, X, Y, groupes = self.prepare_X_and_Y()
-            if len(X) == 0 or len(Y) == 0:
-                raise ValueError("Erreur X ou Y ne contient rien ")
-
-            session_non_utilise = [13, 17]
-            session_evaluation = [14, 15, 16]
-            test_mask = np.isin(groupes, session_evaluation)
-            train_mask = ~np.isin(groupes, session_evaluation + session_non_utilise)
-
-            X_train_final, Y_train_final = X[train_mask], Y[train_mask]
-            X_test_final, Y_test_final = X[test_mask], Y[test_mask]
-
-            print(f"\n[Évaluation Finale STRICTE]")
-            print(
-                f"--- Entraînement final sur {len(np.unique(groupes[train_mask]))} sessions ({X_train_final.shape[0]} TRs) ---")
-            print(f"--- Test pur sur sessions {session_evaluation} ({X_test_final.shape[0]} TRs) ---")
-
-            # Appel de la Ridge avec les alphas fixés
-            scores_finaux, alphas_utilises = self.ridge_regression(
-                PCA_flag=PCA_flag,
-                alphas=None,  # La grille n'est plus explorée
-                X_train=X_train_final,
-                Y_train=Y_train_final,
-                X_test=X_test_final,
-                Y_test=Y_test_final,
-                alphas_finaux=alphas_finaux_optimises  # On force les alphas
-            )
-
-            del X, Y, groupes
-            return scores_finaux, [scores_finaux], alphas_utilises, [alphas_utilises]
+        return scores_r2_finaux, scores["test_r2"], alphas_finaux, alphas_tous_folds
 
 
 
@@ -509,162 +400,51 @@ class RidgeRegression:
         self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True, suffix=suffix)
 
 
-
 if __name__ == "__main__":
 
     # --- PARAMÈTRES ---
-    plateforme = ["Rorqual", "Mac"]
-    plateforme = plateforme[0]
-
-    liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
-    liste_sujets = liste_sujets[2:3]
+    plateforme = "Rorqual"
+    liste_sujets = ["sub-03"]
     LAYER = "encoder_layer7_ffn"
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
     flag_precision_voxel = True
     randomize_flag = False
-    flag_opt_alphas = False
     ROImask_flag = True
-    mode = ["train", "test"]
-    mode = mode[1]
-    cv_type = "LeaveOneGroupOut"
-    PCA_flag = False
 
-    liste_ROI = ["faceFFA","scenePPA", "bodyEBA", "V1", "V2", "V3", "hv4", "dorsalAttention", "ventralAttention", "visual" ]
+    liste_ROI = ["faceFFA", "scenePPA", "bodyEBA", "V1", "V2", "V3", "hv4", "dorsalAttention", "ventralAttention", "visual"]
 
-    # Paramètres de la boucle d'optimisation adaptative
-    max_iterations = 100
-    tolerance_evolution = 1e-4
+    if flag_precision_voxel == True:
+        alphas_par_sujet = {
+            "sub-01": np.logspace(2, 9, 20),
+            "sub-02": np.logspace(1, 8, 20),
+            "sub-03": np.logspace(0, 7, 20),
+            "sub-06": np.logspace(2, 9, 20),
+        }
+    else:
+        alphas_par_sujet = {
+            "sub-01": np.logspace(2, 7, 20),
+            "sub-02": np.logspace(1, 6, 20),
+            "sub-03": np.logspace(1, 4, 20),
+            "sub-06": np.logspace(2, 5, 20),
+        }
 
+    # --- BOUCLE SUJETS ---
     for SUB in liste_sujets:
-        ridge = RidgeRegression(plateforme, SUB, LAYER, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, ROImask_flag, randomize_flag)
+        print(f"\n{'=' * 60}\n  Sujet : {SUB}\n{'=' * 60}")
 
-        if flag_opt_alphas:
-            # --- MODE OPTIMISATION : boucle adaptive sur la grille d'alphas ---
-            start_log, end_log = 5, 6
-            meilleur_r2_max = -np.inf
-            iteration = 1
+        #alphas = alphas_par_sujet[SUB]
+        alphas = np.logspace(1, 20, 20)
+        ridge = RidgeRegression(
+            plateforme, SUB, LAYER,
+            flag_delai_bold_brute, centrage_donne_temps,
+            flag_precision_voxel, ROImask_flag, randomize_flag
+        )
 
-            while iteration <= max_iterations:
-                alphas = np.logspace(start_log, end_log, 20)
-                alpha_min_str = f"{alphas.min():.1e}"
-                alpha_max_str = f"{alphas.max():.1e}"
-                suffixe_fichier = f"_amin-{alpha_min_str}_amax-{alpha_max_str}"
+        scores_r2, scores_par_fold, alphas_finaux, alphas_par_fold = ridge.cross_validation(alphas)
 
-                print("-" * 113)
-                print(f"\n[Sujet: {SUB} | Iteration {iteration}] Test de la plage alphas : [{alpha_min_str} -> {alpha_max_str}]")
-
-                scores_r2, scores_tous_les_folds, alphas_tous_lots, alphas_tous_les_folds = ridge.cross_validation("train", cv_type, alphas, PCA_flag)
-                if scores_r2 is None:
-                    print(f" Echec de l'evaluation pour {SUB}. Passage au sujet suivant.")
-                    break
-
-                r2_max_actuel = np.max(scores_r2)
-                print(f" -> R2 max mesure a l'iteration {iteration} : {r2_max_actuel:.5f}")
-                ridge.brain_mapping_r2(scores_r2, suffix=suffixe_fichier)
-                ridge.brain_mapping_alphas(alphas_tous_lots, suffix=suffixe_fichier)
-                ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas, suffix=suffixe_fichier)
-
-                total_cibles = len(alphas_tous_lots)
-                n_borne_min = np.sum(alphas_tous_lots == alphas.min())
-                n_borne_max = np.sum(alphas_tous_lots == alphas.max())
-                seuil_saturation = 0.05 * total_cibles
-
-                gain_r2 = r2_max_actuel - meilleur_r2_max
-                if gain_r2 < tolerance_evolution:
-                    print(f" Convergence atteinte : gain R2 max = {gain_r2:.5f} < {tolerance_evolution}.")
-                    break
-
-                meilleur_r2_max = r2_max_actuel
-
-                if n_borne_max > seuil_saturation and n_borne_min <= seuil_saturation:
-                    print(f" -> Saturation haute ({n_borne_max}/{total_cibles} cibles). Decalage vers le haut.")
-                    start_log += 1
-                    end_log += 1
-                elif n_borne_min > seuil_saturation and n_borne_max <= seuil_saturation:
-                    print(f" -> Saturation basse ({n_borne_min}/{total_cibles} cibles). Decalage vers le bas.")
-                    start_log -= 1
-                    end_log -= 1
-                elif n_borne_max > seuil_saturation and n_borne_min > seuil_saturation:
-                    print(f" -> Double saturation. Elargissement global de la grille.")
-                    start_log -= 1
-                    end_log += 1
-                else:
-                    print(" -> Distribution optimale. Fin de la recherche.")
-                    break
-
-                iteration += 1
-
-            print(f" Fin de l'optimisation pour {SUB}. Meilleur R2 max : {meilleur_r2_max:.5f}\n")
-
-        else:
-            if mode == "test":
-                # --- MODE NORMAL : run unique avec la grille fixe ---
-                if flag_precision_voxel == False:
-                    if SUB == "sub-01":
-                        alphas = np.logspace(2, 7, 20)
-                    elif SUB == "sub-02":
-                        alphas = np.logspace(1, 6, 20)
-                    elif SUB == "sub-03":
-                        alphas = np.logspace(1, 4, 20)
-                    else:
-                        alphas = np.logspace(2, 5, 20)
-                else:
-                    if SUB == "sub-01":
-                        alphas = np.logspace(2, 9, 20)
-                    elif SUB == "sub-02":
-                        alphas = np.logspace(1, 8, 20)
-                    elif SUB == "sub-03":
-                        alphas = np.logspace(0, 7, 20)
-                    else:
-                        alphas = np.logspace(2, 9, 20)
-
-                scores_train, scores_tous_les_folds, alphas_optimaux, alphas_tous_les_folds = ridge.cross_validation("train", cv_type, alphas, PCA_flag)
-
-                print(f"\n{'=' * 50}")
-                print(f"ÉTAPE 2 : ÉVALUATION FINALE STRICTE (TEST)")
-                print(f"{'=' * 50}")
-
-                # Lancement exclusif en mode "test" en injectant les alphas trouvés
-                scores_test, _, alphas_utilises, alphas_utilises_liste = ridge.cross_validation(
-                    mode="test",
-                    cv_type=cv_type,
-                    alphas=None,
-                    PCA_flag=PCA_flag,
-                    alphas_finaux_optimises=alphas_optimaux
-                )
-
-                if scores_test is not None:
-                    ridge.brain_mapping_r2(scores_test)
-                    ridge.brain_mapping_alphas(alphas_utilises,)
-                    ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
-                    ridge.plot_ROImask_histogram(scores_test, liste_ROI)
-            else:
-                if flag_precision_voxel == False:
-                    if SUB == "sub-01":
-                        alphas = np.logspace(2, 7, 20)
-                    elif SUB == "sub-02":
-                        alphas = np.logspace(1, 6, 20)
-                    elif SUB == "sub-03":
-                        alphas = np.logspace(1, 4, 20)
-                    else:
-                        alphas = np.logspace(2, 5, 20)
-                else:
-                    if SUB == "sub-01":
-                        alphas = np.logspace(2, 9, 20)
-                    elif SUB == "sub-02":
-                        alphas = np.logspace(1, 8, 20)
-                    elif SUB == "sub-03":
-                        alphas = np.logspace(0, 7, 20)
-                    else:
-                        alphas = np.logspace(2, 9, 20)
-
-                scores_train, scores_tous_les_folds, alphas_optimaux, alphas_tous_les_folds = ridge.cross_validation("train", cv_type, alphas, PCA_flag)
-
-                if scores_train is not None:
-                    ridge.brain_mapping_r2(scores_train)
-                    ridge.brain_mapping_alphas(alphas_optimaux,)
-                    ridge.plot_alphas_histogram(alphas_tous_les_folds, grille_alphas=alphas)
-                    ridge.plot_ROImask_histogram(scores_train, liste_ROI)
-
+        ridge.brain_mapping_r2(scores_r2)
+        ridge.brain_mapping_alphas(alphas_finaux)
+        ridge.plot_alphas_histogram(alphas_par_fold, grille_alphas=alphas)
+        ridge.plot_ROImask_histogram(scores_r2, liste_ROI)
