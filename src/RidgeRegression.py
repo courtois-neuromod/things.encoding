@@ -3,9 +3,6 @@ Régression Ridge pour l'encodage cérébral THINGS memory.
 Entraîne une RidgeCV par couche et évalue la prédiction.
 """
 from pathlib import Path
-
-from nibabel.testing import np_features
-
 from TribeHDF5Normalization import TribeHDF5Normalization
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV
@@ -231,12 +228,15 @@ class RidgeRegression:
             X_train, X_test = X[train_mask], X[test_mask]
             Y_train, Y_test = Y[train_mask], Y[test_mask]
 
-            scaler = StandardScaler()
-            X_scaled_train = scaler.fit_transform(X_train)
-            X_scaled_test = scaler.transform(X_test)
+            scaler_X = StandardScaler()
+            X_scaled_train = scaler_X.fit_transform(X_train)
+            X_scaled_test = scaler_X.transform(X_test)
+
+            scaler_Y = StandardScaler()
+            Y_scaled_train = scaler_Y.fit_transform(Y_train)
+            Y_scaled_test = scaler_Y.transform(Y_test)
 
             n_lots = int(np.ceil(n_features/ taille_lot))
-
             for index_lot, debut in enumerate(range(0, n_features, taille_lot)):
 
                 fin = min(debut + taille_lot, n_features)
@@ -249,12 +249,12 @@ class RidgeRegression:
                     fit_intercept=True,
                 )
 
-                modele.fit(X_scaled_train, Y_train[:, debut:fin])
+                modele.fit(X_scaled_train, Y_scaled_train[:, debut:fin])
 
                 # Evaluation sur le fold test
                 Y_pred = modele.predict(X_scaled_test)
 
-                r2_fold[index_fold, debut:fin] = r2_score(Y_test[:, debut:fin], Y_pred, multioutput="raw_values")
+                r2_fold[index_fold, debut:fin] = r2_score(Y_scaled_test[:, debut:fin], Y_pred, multioutput="raw_values")
                 alphas_fold[index_fold, debut:fin] = modele.alpha_
 
                 del modele, Y_pred
@@ -262,14 +262,68 @@ class RidgeRegression:
 
                 if index_lot % 10 == 0:
                     print(f"  Fold {index_fold + 1}/{n_folds} | lot {index_lot + 1}/{n_lots}")
-                    print(f"      R2 max -> {np.max(r2_fold[index_fold]):.5f}")
+                    print(f"      R2 max -> {np.max(r2_fold[index_fold, debut:fin]):.5f}")
 
-            print(f"  Session {session_test:02d} en test → R² max : {np.max(r2_fold):.5f}")
+            print(f"  Session {session_test:02d} en test → R² max : {np.max(r2_fold[index_fold]):.5f}")
 
         scores_r2_finaux = np.mean(r2_fold, axis=0)
         alphas_finaux = 10 ** np.mean(np.log10(alphas_fold), axis=0)
 
         return scores_r2_finaux, r2_fold, alphas_finaux, alphas_fold
+
+    def evaluation_finale(self, alphas_optimaux, taille_lot = 5000):
+        runs_ok, X, Y, groupes = self.prepare_X_and_Y()
+
+        # Masque : on exclut les sessions réservées au test final et les gaps
+        sessions_exclues = [13, 17]
+        sessions_evaluation = [14, 15, 16]
+
+        train_masque = ~np.isin(groupes, sessions_exclues + sessions_evaluation)
+        test_masque = np.isin(groupes, sessions_evaluation)
+
+        X_train, X_test = X[train_masque], X[test_masque]
+        Y_train, Y_test = Y[train_masque], Y[test_masque]
+
+        scaler_X = StandardScaler()
+        X_scaled_train = scaler_X.fit_transform(X_train)
+        X_scaled_test = scaler_X.transform(X_test)
+
+        scaler_Y = StandardScaler()
+        Y_scaled_train = scaler_Y.fit_transform(Y_train)
+        Y_scaled_test = scaler_Y.transform(Y_test)
+
+        print(f"Train : {X_train.shape[0]} TRs | Test : {X_test.shape[0]} TRs")
+
+        n_features = Y.shape[1]
+        n_lots = int(np.ceil(n_features / taille_lot))
+        r2_final = np.zeros(n_features, dtype=np.float32)
+        alphas_utilises = np.zeros(n_features, dtype=np.float32)
+
+        for index_lot, debut in enumerate(range(0, n_features, taille_lot)):
+
+            fin = min(debut + taille_lot, n_features)
+
+            grille_alphas_lot = np.unique(alphas_optimaux[debut:fin])
+
+            # Boucle interne avec LOO analytique
+            modele = RidgeCV(
+                alphas=grille_alphas_lot,
+                alpha_per_target=True,
+                cv=None,  # LOO activé
+                fit_intercept=True,
+            )
+
+            modele.fit(X_scaled_train, Y_scaled_train[:, debut:fin])
+
+            # Evaluation sur le fold test
+            Y_pred = modele.predict(X_scaled_test)
+
+            r2_final[debut:fin] = r2_score(Y_scaled_test[:, debut:fin], Y_pred, multioutput="raw_values")
+            alphas_utilises[debut:fin] = modele.alpha_
+            del modele, Y_pred
+            gc.collect()
+
+        return r2_final, alphas_utilises
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
@@ -461,9 +515,18 @@ if __name__ == "__main__":
             flag_precision_voxel, ROImask_flag, randomize_flag
         )
 
-        scores_r2, scores_par_fold, alphas_finaux, alphas_par_fold = ridge.cross_validation(alphas)
+        # Étape 1 — boucle interne : trouve les alphas optimaux
+        print("\n[ÉTAPE 1] Cross-validation interne — optimisation des alphas")
+        scores_r2, r2_fold, alphas_finaux, alphas_fold = ridge.cross_validation(alphas)
 
-        ridge.brain_mapping_r2(scores_r2)
-        ridge.brain_mapping_alphas(alphas_finaux)
-        ridge.plot_alphas_histogram(alphas_par_fold, grille_alphas=alphas)
-        ridge.plot_ROImask_histogram(scores_r2, liste_ROI)
+        #ridge.brain_mapping_r2(scores_r2)
+        #ridge.plot_alphas_histogram(alphas_fold, grille_alphas=alphas)
+
+        # Étape 2 — entraînement final + test strict sur sessions 14-15-16
+        print("\n[ÉTAPE 2] Évaluation finale stricte sur sessions 14-15-16")
+        r2_test, alphas_utilises = ridge.evaluation_finale(alphas_finaux)
+
+        ridge.brain_mapping_r2(r2_test, suffix="_test_final")
+        ridge.brain_mapping_alphas(alphas_utilises, suffix="_test_final")
+        ridge.plot_alphas_histogram([alphas_utilises], grille_alphas=alphas, suffix="_test_final")
+        ridge.plot_ROImask_histogram(r2_test, liste_ROI)
