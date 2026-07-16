@@ -3,6 +3,9 @@ Régression Ridge pour l'encodage cérébral THINGS memory.
 Entraîne une RidgeCV par couche et évalue la prédiction.
 """
 from pathlib import Path
+
+from nibabel.testing import np_features
+
 from TribeHDF5Normalization import TribeHDF5Normalization
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV
@@ -204,7 +207,7 @@ class RidgeRegression:
 
             return runs_ok, X, Y, groupes
 
-    def cross_validation(self, alphas):
+    def cross_validation(self, alphas, taille_lot = 5000):
 
         runs_ok, X, Y, groupes = self.prepare_X_and_Y()
 
@@ -213,44 +216,60 @@ class RidgeRegression:
         masque = ~np.isin(groupes, sessions_a_exclure)
         X, Y, groupes = X[masque], Y[masque], groupes[masque]
 
-        # Boucle interne : RidgeCV choisit l'alpha par LOO analytique
-        estimateur = make_pipeline(
-            StandardScaler(),
-            RidgeCV(
-                alphas=alphas,
-                alpha_per_target=True,
-                cv=None,  # LOO analytique interne
-                fit_intercept=True,
-            )
-        )
+        sessions = np.unique(groupes)
+        n_features = Y.shape[1]
+        n_folds = len(sessions)
 
-        # Boucle externe : LeaveOneGroupOut mesure R²
-        outer_cv = LeaveOneGroupOut()
+        r2_fold = np.zeros((n_folds, n_features), dtype=np.float32)
+        alphas_fold = np.zeros((n_folds, n_features), dtype=np.float64)
 
-        scores = cross_validate(
-            estimateur,
-            X, Y,
-            cv=outer_cv,
-            groups=groupes,
-            scoring={
-                "r2": make_scorer(r2_score, multioutput="raw_values"),
-                "pearson": make_scorer(pearson_r_columnwise),
-            },
-            return_estimator=True,
-            n_jobs=-1,
-        )
+        for index_fold, session_test in enumerate(sessions):
 
-        # Résultats
-        scores_r2_finaux = np.mean(scores["test_r2"], axis=0)
+            train_mask = groupes != session_test
+            test_mask = groupes == session_test
 
-        alphas_tous_folds = [
-            est.named_steps["ridgecv"].alpha_
-            for est in scores["estimator"]
-        ]
-        alphas_finaux = 10 ** np.mean(np.log10(alphas_tous_folds), axis=0)
+            X_train, X_test = X[train_mask], X[test_mask]
+            Y_train, Y_test = Y[train_mask], Y[test_mask]
 
-        return scores_r2_finaux, scores["test_r2"], alphas_finaux, alphas_tous_folds
+            scaler = StandardScaler()
+            X_scaled_train = scaler.fit_transform(X_train)
+            X_scaled_test = scaler.transform(X_test)
 
+            n_lots = int(np.ceil(n_features/ taille_lot))
+
+            for index_lot, debut in enumerate(range(0, n_features, taille_lot)):
+
+                fin = min(debut + taille_lot, n_features)
+
+                # Boucle interne avec LOO analytique
+                modele = RidgeCV(
+                    alphas=alphas,
+                    alpha_per_target=True,
+                    cv=None, #LOO activé
+                    fit_intercept=True,
+                )
+
+                modele.fit(X_scaled_train, Y_train[:, debut:fin])
+
+                # Evaluation sur le fold test
+                Y_pred = modele.predict(X_scaled_test)
+
+                r2_fold[index_fold, debut:fin] = r2_score(Y_test[:, debut:fin], Y_pred, multioutput="raw_values")
+                alphas_fold[index_fold, debut:fin] = modele.alpha_
+
+                del modele, Y_pred
+                gc.collect()
+
+                if index_lot % 10 == 0:
+                    print(f"  Fold {index_fold + 1}/{n_folds} | lot {index_lot + 1}/{n_lots}")
+                    print(f"      R2 max -> {np.max(r2_fold[index_fold]):.5f}")
+
+            print(f"  Session {session_test:02d} en test → R² max : {np.max(r2_fold):.5f}")
+
+        scores_r2_finaux = np.mean(r2_fold, axis=0)
+        alphas_finaux = 10 ** np.mean(np.log10(alphas_fold), axis=0)
+
+        return scores_r2_finaux, r2_fold, alphas_finaux, alphas_fold
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
