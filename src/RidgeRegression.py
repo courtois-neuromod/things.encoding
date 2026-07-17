@@ -20,6 +20,7 @@ from matplotlib.ticker import FuncFormatter
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 import plotly.express as px
+import seaborn as sns
 
 matplotlib.use('Agg')
 
@@ -334,7 +335,7 @@ class RidgeRegression:
         ROIs_noms = []
         ROIs_vecteur = []
 
-        if flag_precision_voxel:
+        if self.flag_precision_voxel:
             with h5py.File(fichier_ROImask, 'r') as fichier:
                 for groupe in fichier.keys():
                     for sous_cle in fichier[groupe].keys():
@@ -348,64 +349,61 @@ class RidgeRegression:
                 print(df.shape)
 
                 fig = px.box(df, x="ROI", y="r2", color="ROI", points="all")
+                fig.update_traces(
+                    marker=dict(opacity=0.3, size=3),
+                )
                 fig.write_html(str(chemins.root_encoding / "output" / f"ROImask_{self.subject}.html"))
             print("Histogramme ROI sauvegardé :", str(chemins.root_encoding / "output" / f"ROImask_{self.subject}.html"))
             return
         else:
             return "Pas en voxel"
 
-
-    def plot_alphas_histogram(self, alphas_par_fold, grille_alphas, suffix=""):
-        fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
+    def plot_alphas_histogram(self, alphas_fold, grille_alphas, alphas_finaux=None, suffix=""):
         log10_grille = np.log10(grille_alphas)
-
         step = log10_grille[1] - log10_grille[0]
         bins = np.append(log10_grille - step / 2, log10_grille[-1] + step / 2)
 
-        n_folds = len(alphas_par_fold)
-        cmap = plt.get_cmap("tab20" if n_folds <= 20 else "viridis")
-
-        for cv_fold, best_alphas in enumerate(alphas_par_fold):
-            log10_best_alphas = np.log10(best_alphas)
-
-            hist, _ = np.histogram(log10_best_alphas, bins=bins)
-
-            couleur = cmap(cv_fold / max(1, n_folds - 1)) if n_folds > 1 else "#d73027"
-            label = f"Fold {cv_fold + 1}" if n_folds > 1 else "Test Unique"
-
-            if n_folds == 1:
-                # Vrais bâtons pleins classiques pour 1 seul test
-                ax.hist(
-                    log10_best_alphas, bins=bins, color=couleur, edgecolor="black", alpha=0.8, label=label
-                )
-            else:
-                # Bâtons non-remplis pour superposer plusieurs folds proprement
-                ax.hist(
-                    log10_best_alphas, bins=bins, histtype="step",color=couleur, linewidth=2, alpha=0.8, label=label
-                )
-
-        unite = "voxels" if self.flag_precision_voxel else "parcelles"
-        ax.set_ylabel(f"Nombre de {unite}", fontsize=12)
-        ax.set_xlabel(r"$\log_{10}(\alpha)$", fontsize=12)
-
-        titre = f"Distribution des Alphas optimaux par Fold\n{self.subject} - {self.layer}"
-        ax.set_title(titre, fontsize=15, fontweight='bold')
-        ax.grid(True, linestyle='--', alpha=0.7)
-
-        ax.set_xticks(log10_grille)
-        ax.set_xticklabels([f"{x:.1f}" for x in log10_grille], rotation=45)
-
-        if n_folds > 1:
-            ax.legend(fontsize=9, bbox_to_anchor=(1.05, 1), loc='upper left', ncol=(n_folds // 15 + 1))
+        # Construction du DataFrame et paramètres spécifiques selon le cas
+        if alphas_finaux is not None:
+            log10_valeurs = np.log10(alphas_finaux)
+            df = pd.DataFrame({"log10_alpha": log10_valeurs})
+            hue_params = {"color": "#d73027", "kde": True, "kde_kws": {"bw_adjust": 0.5}, "line_kws": {"linewidth": 2}}
+            titre = "Distribution des alphas moyens"
         else:
-            ax.legend(fontsize=11)
+            alphas_fold = np.array(alphas_fold)
+            rows = [{"log10_alpha": np.log10(v), "fold": f"fold_{i + 1}"}
+                    for i, fold in enumerate(alphas_fold) for v in fold]
+            df = pd.DataFrame(rows)
+            log10_valeurs = np.log10(alphas_fold.flatten())
+            hue_params = {"hue": "fold", "multiple": "stack", "palette": "tab20"}
+            titre = "Distribution des alphas par fold"
 
-        nom_fichier = f"histogram_alphas_folds_{self.subject}_{self.layer}_{unite}{suffix}.png"
+        # Limites et ticks communs
+        xlim_min = log10_valeurs.min() - step / 2
+        xlim_max = log10_valeurs.max() + step / 2
+        ticks_visibles = log10_grille[(log10_grille >= xlim_min) & (log10_grille <= xlim_max)]
+
+        # Figure
+        unite = "voxels" if self.flag_precision_voxel else "parcelles"
+        fig, ax = plt.subplots(figsize=(10, 5))
+        sns.histplot(data=df, x="log10_alpha", bins=bins, shrink=0.8, ax=ax, **hue_params)
+        ax.set_xticks(ticks_visibles)
+        ax.set_xticklabels([f"{x:.1f}" for x in ticks_visibles], rotation=45)
+        ax.set_xlim(xlim_min, xlim_max)
+        ax.set_xlabel("log10(alpha)")
+        ax.set_ylabel(f"Nombre de {unite}")
+        ax.set_title(titre)
+        plt.tight_layout()
+        nom_fichier = f"histogram_alphas_{self.subject}_{self.layer}_{unite}{suffix}.png"
         chemin_sortie = self.get_path_file_by_plateform(self.plateforme).root_encoding / "output" / nom_fichier
+        plt.savefig(chemin_sortie, dpi=300)
+        plt.close()
+        print(f"Histogramme alphas sauvegardé : {chemin_sortie}")
 
-        fig.savefig(chemin_sortie, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-        print(f"Histogramme diagnostic sauvegardé : {chemin_sortie}")
+    def compute_tsnr(self):
+        _, X, Y, groupes = self.create_X_Y_total()
+        tsnr = Y.mean(axis=0) / (Y.std(axis=0) + 1e-8)
+        return tsnr
 
     def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold = 0.01, echelle_log=False, vmin = None, vmax = None, suffix=""):
         chemins = self.get_path_file_by_plateform(self.plateforme)
@@ -446,7 +444,7 @@ class RidgeRegression:
         if echelle_log and display._cbar is not None:
             display._cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda valeur, position: f"$10^{{{valeur:.0f}}}$"))
 
-        chemin_sortie = f"../output/brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}{suffix}.png"
+        chemin_sortie = chemins.root_encoding / "output" / f"brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}{suffix}.png"
         display.savefig(chemin_sortie, dpi=300)
         display.close()
         plt.close(fig)
@@ -460,6 +458,10 @@ class RidgeRegression:
     def brain_mapping_alphas(self, alphas_tous_les_lots, suffix=""):
         self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True, suffix=suffix)
 
+    def brain_mapping_tsnr(self, suffix=""):
+        tsnr = self.compute_tsnr()
+        # évite que les valeurs extrêmes écrasent la colorbar
+        self._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues", treshold=0.0, echelle_log=False,vmin=0,vmax=np.percentile(tsnr, 95),suffix=suffix,)
 
 if __name__ == "__main__":
 
@@ -469,52 +471,64 @@ if __name__ == "__main__":
     LAYER = "encoder_layer7_ffn"
 
     flag_delai_bold_brute = True
-    centrage_donne_temps = False
-    flag_precision_voxel = False
-    randomize_flag = False
-    ROImask_flag = True
+    centrage_donne_temps  = False
+    flag_precision_voxel  = True
+    randomize_flag        = False
+    ROImask_flag          = True
 
-    liste_ROI = ["faceFFA", "scenePPA", "bodyEBA", "V1", "V2", "V3", "hv4", "dorsalAttention", "ventralAttention", "visual"]
+    liste_ROI = ["faceFFA", "scenePPA", "bodyEBA", "V1", "V2", "V3",
+                 "hv4", "dorsalAttention", "ventralAttention", "visual"]
 
-    if flag_precision_voxel == True:
-        alphas_par_sujet = {
-            "sub-01": np.logspace(2, 9, 20),
-            "sub-02": np.logspace(1, 8, 20),
-            "sub-03": np.logspace(0, 7, 20),
-            "sub-06": np.logspace(2, 9, 20),
-        }
-    else:
-        alphas_par_sujet = {
-            "sub-01": np.logspace(2, 7, 20),
-            "sub-02": np.logspace(1, 6, 20),
-            "sub-03": np.logspace(1, 4, 20),
-            "sub-06": np.logspace(2, 5, 20),
-        }
+    alphas_par_sujet_voxel = {
+        "sub-01": np.logspace(2, 9, 20),
+        "sub-02": np.logspace(1, 8, 20),
+        "sub-03": np.logspace(0, 7, 20),
+        "sub-06": np.logspace(2, 9, 20),
+    }
+    alphas_par_sujet_parcelle = {
+        "sub-01": np.logspace(2, 7, 20),
+        "sub-02": np.logspace(1, 6, 20),
+        "sub-03": np.logspace(1, 4, 20),
+        "sub-06": np.logspace(2, 5, 20),
+    }
 
-    # --- BOUCLE SUJETS ---
     for SUB in liste_sujets:
-        print(f"\n{'=' * 60}\n  Sujet : {SUB}\n{'=' * 60}")
+        print(f"\n{'='*60}\n  Sujet : {SUB}\n{'='*60}")
 
-        #alphas = alphas_par_sujet[SUB]
-        alphas = np.logspace(1, 20, 20)
+        alphas = alphas_par_sujet_voxel[SUB] if flag_precision_voxel else alphas_par_sujet_parcelle[SUB]
+
+        # ── Alignement normal ────────────────────────────────────────────────
         ridge = RidgeRegression(
             plateforme, SUB, LAYER,
             flag_delai_bold_brute, centrage_donne_temps,
-            flag_precision_voxel, ROImask_flag, randomize_flag
+            flag_precision_voxel, ROImask_flag, randomize_flag=False
         )
 
-        # Étape 1 — boucle interne : trouve les alphas optimaux
-        print("\n[ÉTAPE 1] Cross-validation interne — optimisation des alphas")
+        print("\n[ÉTAPE 1] Cross-validation — optimisation des alphas")
         scores_r2, r2_fold, alphas_finaux, alphas_fold = ridge.cross_validation(alphas)
+        ridge.plot_alphas_histogram(alphas_fold, grille_alphas=alphas, suffix="_cv")
 
-        #ridge.brain_mapping_r2(scores_r2)
-        #ridge.plot_alphas_histogram(alphas_fold, grille_alphas=alphas)
-
-        # Étape 2 — entraînement final + test strict sur sessions 14-15-16
         print("\n[ÉTAPE 2] Évaluation finale stricte sur sessions 14-15-16")
         r2_test, alphas_utilises = ridge.evaluation_finale(alphas_finaux)
 
         ridge.brain_mapping_r2(r2_test, suffix="_test_final")
         ridge.brain_mapping_alphas(alphas_utilises, suffix="_test_final")
-        ridge.plot_alphas_histogram([alphas_utilises], grille_alphas=alphas, suffix="_test_final")
+        ridge.plot_alphas_histogram(alphas_fold=None, grille_alphas=alphas,
+                                    alphas_finaux=alphas_utilises, suffix="_test_final")
         ridge.plot_ROImask_histogram(r2_test, liste_ROI)
+
+        print("\n[ÉTAPE 3] TSNR")
+        ridge.brain_mapping_tsnr()
+
+        # ── Alignement randomisé (baseline) ─────────────────────────────────
+        print("\n[ÉTAPE 4] Baseline — alignement randomisé")
+        ridge_random = RidgeRegression(
+            plateforme, SUB, LAYER,
+            flag_delai_bold_brute, centrage_donne_temps,
+            flag_precision_voxel, ROImask_flag, randomize_flag=True
+        )
+
+        scores_r2_random, _, alphas_finaux_random, alphas_fold_random = ridge_random.cross_validation(alphas)
+        r2_test_random, _ = ridge_random.evaluation_finale(alphas_finaux_random)
+
+        ridge_random.brain_mapping_r2(r2_test_random, suffix="_randomise")
