@@ -6,9 +6,12 @@ forward hooks, et sauvegarde les activations en HDF5.
 import warnings
 import argparse
 import logging
+import h5py
+import torch
 from pathlib import Path
+import gc
 
-
+from TransformerHooks import TransformerHooks
 from Config import Config
 from HDF5Writer import HDF5Writer
 
@@ -47,41 +50,40 @@ if __name__ == '__main__':
     writer = HDF5Writer(HDF5_DIR)
     video_files = sorted(DATA_DIR.glob(f"friends_s{season:02d}e*[abc].mkv"))
     print(f"Saison {season} --> {len(video_files)} vidéos trouvées")
-    """
-for video_path in video_files:
-    episode = video_path.stem.split("_")[-1]  # ex. "s01e01a"
+    
+    for video_path in video_files:
+        episode = video_path.stem.split("_")[-1]  # ex. "s01e01a"
 
-    output_path = HDF5_DIR / f"{season}.h5"
-    run_path = f"{episode}/clip"
-    if output_path.exists():
-        with h5py.File(output_path, "r") as hf:
-            if run_path in hf and 'preds' in hf[run_path]:
-                print(f"{episode} déjà traité")
-                continue
+        output_path = HDF5_DIR / f"{season}.h5"
+        run_path = f"{episode}/clip"
+        if output_path.exists():
+            with h5py.File(output_path, "r") as hf:
+                if run_path in hf and 'preds' in hf[run_path]:
+                    print(f"{episode} déjà traité")
+                    continue
 
-    try:
-        events = model.get_events_dataframe(video_path=str(video_path))
+        try:
+            events = model.get_events_dataframe(video_path=str(video_path))
 
-        hooks = TransformerHooks(fmri_enc)
-        hooks.attacher()
+            hooks = TransformerHooks(fmri_enc)
+            hooks.attacher()
 
-        with torch.no_grad():
-            preds, segments = model.predict(events)
+            with torch.no_grad():
+                preds, segments = model.predict(events)
 
-        hooks.retirer()
-        features = hooks.get_features()
+            hooks.retirer()
+            features = hooks.get_features()
 
-        writer.sauvegarder(features, preds, str(season), episode, "clip")
+            writer.sauvegarder(features, preds, str(season), episode, "clip")
 
-        print(f"{episode} traité - preds shape: {preds.shape}", flush=True)
+            print(f"{episode} traité - preds shape: {preds.shape}", flush=True)
 
-        # Nettoyage de la mémoire pour la vidéo suivante
-        del features, preds, segments, events, hooks
+            # Nettoyage de la mémoire pour la vidéo suivante
+            del features, preds, segments, events, hooks
 
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-    except Exception as e:
-        print(f"{episode} non traité - Erreur: {e}", flush=True)
-"""
+        except Exception as e:
+            print(f"{episode} non traité - Erreur: {e}", flush=True)

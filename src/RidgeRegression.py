@@ -470,7 +470,7 @@ if __name__ == "__main__":
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
-    flag_precision_voxel = True
+    flag_precision_voxel = False
     randomize_flag = False
     ROImask_flag = True
 
