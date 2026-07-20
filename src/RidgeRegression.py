@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 import plotly.express as px
 import seaborn as sns
+from sklearn.model_selection import GroupKFold
 
 matplotlib.use('Agg')
 
@@ -128,7 +129,7 @@ class RidgeRegression:
         print(f"{len(runs)} runs trouvés dans {chemins.chemin_tribe.name}")
         return runs
 
-    def create_X_Y_total(self, ):
+    def create_X_Y_total(self):
 
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
@@ -259,6 +260,37 @@ class RidgeRegression:
             gc.collect()
 
         return r2_lots, alphas_lots
+
+    def nested_cross_validation(self):
+
+        _, X, Y, groupes = self.create_X_Y_total()
+        sessions = np.unique(groupes)
+        n_sessions = len(sessions)
+        # On découpe les groupes en 6 sous groupes
+        n_folds_externes = max(5, round(n_sessions / 6))
+        sous_groupes = np.array_split(sessions, n_folds_externes)
+        print(f"Sessions totale avant découpage : {sessions}")
+        print(f"Sous-groupes : {sous_groupes}")
+
+        for i_ext, sessions_test in enumerate(sous_groupes):
+            sessions_train_val = sessions[~np.isin(sessions, sessions_test)]
+            print(f"Sessions train_val du sous groupe {i_ext} : {sessions_train_val}")
+            print(f"Session test du sous-groupes {i_ext}: {sessions_train_val}")
+
+            """
+            train_val_mask = np.isin(groupes, sessions_train_val)
+            test_mask = np.isin(groupes, sessions_test)
+
+            # Boucle interne sur sessions_train_val
+            for index_session, session_val in enumerate(sessions_train_val):
+                train_mask_int = np.isin(groupes, sessions_train_val) & (groupes != session_val)
+                val_mask_int = groupes == session_val
+            """
+        return
+
+
+
+
 
     def cross_validation(self, alphas, taille_lot = 5000):
 
@@ -466,7 +498,7 @@ class RidgeRegression:
 if __name__ == "__main__":
 
     # --- PARAMÈTRES ---
-    plateforme = "Rorqual"
+    plateforme = "Mac"
     liste_sujets = ["sub-03"]
     LAYER = "encoder_layer7_ffn"
 
@@ -504,6 +536,10 @@ if __name__ == "__main__":
             flag_precision_voxel, ROImask_flag, randomize_flag=False
         )
 
+        print("\n[TEST] nested_cross_validation")
+        ridge.nested_cross_validation()
+
+        """
         print("\n[ÉTAPE 1] Cross-validation — optimisation des alphas")
         scores_r2, r2_fold, alphas_finaux, alphas_fold = ridge.cross_validation(alphas)
         ridge.plot_alphas_histogram(alphas_fold, grille_alphas=alphas, suffix="_cv")
@@ -532,3 +568,4 @@ if __name__ == "__main__":
         r2_test_random, _ = ridge_random.evaluation_finale(alphas_finaux_random)
 
         ridge_random.brain_mapping_r2(r2_test_random, suffix="_randomise")
+        """
