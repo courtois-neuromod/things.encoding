@@ -271,21 +271,29 @@ class RidgeRegression:
         sous_groupes = np.array_split(sessions, n_folds_externes)
         print(f"Sessions totale avant découpage : {sessions}")
         print(f"Sous-groupes : {sous_groupes}")
+        liste_numero_test_session = [groupe[0] for groupe in sous_groupes]
+        liste_numero_train_val_session = [groupe[~np.isin(groupe, liste_numero_test_session)] for groupe in sous_groupes]
 
-        for i_ext, sessions_test in enumerate(sous_groupes):
-            sessions_train_val = sessions[~np.isin(sessions, sessions_test)]
-            print(f"Sessions train_val du sous groupe {i_ext} : {sessions_train_val}")
-            print(f"Session test du sous-groupes {i_ext}: {sessions_train_val}")
+        cv = LeaveOneGroupOut()
 
-            """
-            train_val_mask = np.isin(groupes, sessions_train_val)
-            test_mask = np.isin(groupes, sessions_test)
 
-            # Boucle interne sur sessions_train_val
-            for index_session, session_val in enumerate(sessions_train_val):
-                train_mask_int = np.isin(groupes, sessions_train_val) & (groupes != session_val)
-                val_mask_int = groupes == session_val
-            """
+        for i_ext, sessions_train_val in enumerate(liste_numero_train_val_session):
+            print(f"Session train_val du sous-groupes {i_ext}: {sessions_train_val}")
+
+            train_val_masque = np.isin(groupes, sessions_train_val)
+            X_train_val = X[train_val_masque]
+            Y_train_val = Y[train_val_masque]
+            groupe_train_val = groupes[train_val_masque]
+
+            # LeaveOneGroupOut sur les TRs du train_val
+            for i_int, (train_index, val_index) in enumerate(cv.split(X_train_val, Y_train_val, groupe_train_val)):
+                session_val = np.unique(groupe_train_val[val_index])[0]
+                sessions_train = np.unique(groupe_train_val[train_index])
+                print(f"Session val : {session_val}")
+                print(f"Sessions train : {sessions_train}")
+
+
+
         return
 
 
