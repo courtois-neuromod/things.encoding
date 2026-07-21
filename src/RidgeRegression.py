@@ -268,123 +268,126 @@ class RidgeRegression:
         n_sessions = len(sessions)
         n_features = Y.shape[1]
 
-        # Découpage en folds externes (5-6 groupes)
+        # Découpage en folds externes (4 sous-groupes)
         n_folds_externes = max(4, round(n_sessions / 9))
         #sous_groupes = np.array_split(sessions, n_folds_externes)
-        
-        rng = np.random.default_rng(42)
-        sessions_shuffled = rng.permutation(sessions)
-        sous_groupes = np.array_split(sessions_shuffled, n_folds_externes)
-        
-        liste_numero_test_session = [groupe[0] for groupe in sous_groupes]
-        liste_numero_train_val_session = [
-            groupe[~np.isin(groupe, liste_numero_test_session)]
-            for groupe in sous_groupes
-        ]
+        liste_seed = [42, 16, 28, 32]
+        n_seed = len(liste_seed)
+        r2_tous_les_tests = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float32)
+        alphas_tous_externes = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float64)
 
-        print(f"Sessions disponibles : {sessions}")
-        print(f"Sessions test par fold externe : {liste_numero_test_session}")
 
-        cv = LeaveOneGroupOut()
+        for index_seed, seed in enumerate(liste_seed):
+            rng = np.random.default_rng(seed)
+            sessions_shuffled = rng.permutation(sessions)
+            sous_groupes = np.array_split(sessions_shuffled, n_folds_externes)
 
-        r2_tous_les_tests = np.zeros((n_folds_externes, n_features), dtype=np.float32)
-        alphas_tous_externes = np.zeros((n_folds_externes, n_features), dtype=np.float64)
-
-        # BOUCLE EXTERNE
-        for i_extern, sessions_train_val in enumerate(liste_numero_train_val_session):
-
-            session_test = liste_numero_test_session[i_extern]
-            print(f"\n{'=' * 60}")
-            print(f"[Fold externe {i_extern + 1}/{n_folds_externes}] Test : {session_test}")
-
-            # Sessions adjacentes au test set → exclues de la boucle interne
-            idx_test = np.where(sessions == session_test)[0][0]
-            sessions_adjacentes = []
-            if idx_test > 0:
-                sessions_adjacentes.append(sessions[idx_test - 1])
-            if idx_test < n_sessions - 1:
-                sessions_adjacentes.append(sessions[idx_test + 1])
-            sessions_adjacentes = np.array(sessions_adjacentes)
-
-            # Sessions utilisables pour la boucle interne
-            sessions_train_val_filtrees = sessions_train_val[
-                ~np.isin(sessions_train_val, sessions_adjacentes)
+            liste_numero_test_session = [groupe[0] for groupe in sous_groupes]
+            liste_numero_train_val_session = [
+                groupe[~np.isin(groupe, liste_numero_test_session)]
+                for groupe in sous_groupes
             ]
-            print(f"  Adjacentes exclues : {sessions_adjacentes}")
-            print(f"  Train_val boucle interne : {sessions_train_val_filtrees}")
 
-            train_val_masque = np.isin(groupes, sessions_train_val_filtrees)
-            X_train_val = X[train_val_masque]
-            Y_train_val = Y[train_val_masque]
-            groupe_train_val = groupes[train_val_masque]
+            print(f"Sessions disponibles : {sessions}")
+            print(f"Sessions test par fold externe : {liste_numero_test_session}")
 
-            # BOUCLE INTERNE : LeaveOneGroupOut
-            alphas_tous_folds_int = []
+            cv = LeaveOneGroupOut()
 
-            for index_fold, (train_index, val_index) in enumerate(
-                    cv.split(X_train_val, Y_train_val, groupe_train_val)):
-                session_val = np.unique(groupe_train_val[val_index])[0]
-                sessions_train = np.unique(groupe_train_val[train_index])
-                print(f"  [Fold interne {index_fold + 1}] Val : {session_val} | Train : {sessions_train}")
+            # BOUCLE EXTERNE
+            for i_extern, sessions_train_val in enumerate(liste_numero_train_val_session):
 
-                train_masque_int = np.zeros(len(X_train_val), dtype=bool)
-                val_masque_int = np.zeros(len(X_train_val), dtype=bool)
-                train_masque_int[train_index] = True
-                val_masque_int[val_index] = True
+                session_test = liste_numero_test_session[i_extern]
+                print(f"\n{'=' * 60}")
+                print(f"[Fold externe {i_extern + 1}/{n_folds_externes}] Test : {session_test}")
 
-                X_sc_train, X_sc_val, Y_sc_train, Y_sc_val = self._scaler_X_Y(
-                    X_train_val, Y_train_val,
-                    train_masque_int, val_masque_int
+                # Sessions adjacentes au test set → exclues de la boucle interne
+                idx_test = np.where(sessions == session_test)[0][0]
+                sessions_adjacentes = []
+                if idx_test > 0:
+                    sessions_adjacentes.append(sessions[idx_test - 1])
+                if idx_test < n_sessions - 1:
+                    sessions_adjacentes.append(sessions[idx_test + 1])
+                sessions_adjacentes = np.array(sessions_adjacentes)
+
+                # Sessions utilisables pour la boucle interne
+                sessions_train_val_filtrees = sessions_train_val[
+                    ~np.isin(sessions_train_val, sessions_adjacentes)
+                ]
+                print(f"  Adjacentes exclues : {sessions_adjacentes}")
+                print(f"  Train_val boucle interne : {sessions_train_val_filtrees}")
+
+                train_val_masque = np.isin(groupes, sessions_train_val_filtrees)
+                X_train_val = X[train_val_masque]
+                Y_train_val = Y[train_val_masque]
+                groupe_train_val = groupes[train_val_masque]
+
+                # BOUCLE INTERNE : LeaveOneGroupOut
+                alphas_tous_folds_int = []
+
+                for index_fold, (train_index, val_index) in enumerate(
+                        cv.split(X_train_val, Y_train_val, groupe_train_val)):
+                    session_val = np.unique(groupe_train_val[val_index])[0]
+                    sessions_train = np.unique(groupe_train_val[train_index])
+                    print(f"  [Fold interne {index_fold + 1}] Val : {session_val} | Train : {sessions_train}")
+
+                    train_masque_int = np.zeros(len(X_train_val), dtype=bool)
+                    val_masque_int = np.zeros(len(X_train_val), dtype=bool)
+                    train_masque_int[train_index] = True
+                    val_masque_int[val_index] = True
+
+                    X_sc_train, X_sc_val, Y_sc_train, Y_sc_val = self._scaler_X_Y(
+                        X_train_val, Y_train_val,
+                        train_masque_int, val_masque_int
+                    )
+
+                    modele = RidgeCV(
+                        alphas=grille_alphas,
+                        alpha_per_target=True,
+                        cv=None,
+                    )
+                    modele.fit(X_sc_train, Y_sc_train)
+
+                    Y_pred = modele.predict(X_sc_val)
+                    alphas_int = modele.alpha_
+                    alphas_tous_folds_int.append(alphas_int)
+
+                    del modele, Y_pred
+                    gc.collect()
+
+                # Alphas optimaux = moyenne géométrique sur folds internes
+                alphas_tous_folds_int = np.array(alphas_tous_folds_int)
+                alphas_optimaux = 10 ** np.mean(np.log10(alphas_tous_folds_int), axis=0)
+                alphas_tous_externes[index_seed, i_extern] = alphas_optimaux
+
+                print(f"  → Alphas optimaux — médiane log10 : {np.median(np.log10(alphas_optimaux)):.2f}")
+
+                # ── ÉVALUATION EXTERNE ───────────────────────────────────────────────
+                test_masque = groupes == session_test
+
+                X_scaled_train_final, X_scaled_test, Y_scaled_train_final, Y_scaled_test = self._scaler_X_Y(
+                    X, Y, train_val_masque, test_masque
                 )
 
-                modele = RidgeCV(
-                    alphas=grille_alphas,
+                modele_final = RidgeCV(
+                    alphas=alphas_optimaux,
                     alpha_per_target=True,
                     cv=None,
                 )
-                modele.fit(X_sc_train, Y_sc_train)
 
-                Y_pred = modele.predict(X_sc_val)
-                alphas_int = modele.alpha_
-                alphas_tous_folds_int.append(alphas_int)
+                modele_final.fit(X_scaled_train_final, Y_scaled_train_final)
 
-                del modele, Y_pred
+                Y_pred_test = modele_final.predict(X_scaled_test)
+                r2_test = r2_score(Y_scaled_test, Y_pred_test, multioutput="raw_values")
+
+                r2_tous_les_tests[index_seed, i_extern] = r2_test
+                print(f"  → R² max : {np.max(r2_test):.5f}")
+
+                del modele_final, Y_pred_test
                 gc.collect()
 
-            # Alphas optimaux = moyenne géométrique sur folds internes
-            alphas_tous_folds_int = np.array(alphas_tous_folds_int)
-            alphas_optimaux = 10 ** np.mean(np.log10(alphas_tous_folds_int), axis=0)
-            alphas_tous_externes[i_extern] = alphas_optimaux
-
-            print(f"  → Alphas optimaux — médiane log10 : {np.median(np.log10(alphas_optimaux)):.2f}")
-
-            # ── ÉVALUATION EXTERNE ───────────────────────────────────────────────
-            test_masque = groupes == session_test
-
-            X_scaled_train_final, X_scaled_test, Y_scaled_train_final, Y_scaled_test = self._scaler_X_Y(
-                X, Y, train_val_masque, test_masque
-            )
-
-            modele_final = RidgeCV(
-                alphas=alphas_optimaux,
-                alpha_per_target=True,
-                cv=None,
-            )
-
-            modele_final.fit(X_scaled_train_final, Y_scaled_train_final)
-
-            Y_pred_test = modele_final.predict(X_scaled_test)
-            r2_test = r2_score(Y_scaled_test, Y_pred_test, multioutput="raw_values")
-
-            r2_tous_les_tests[i_extern] = r2_test
-            print(f"  → R² max : {np.max(r2_test):.5f}")
-
-            del modele_final, Y_pred_test
-            gc.collect()
-
         # AGRÉGATION
-        r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # shape (n_voxels,)
-        r2_variance = np.std(r2_tous_les_tests, axis=0)  # shape (n_voxels,)
+        r2_moyen = np.mean(r2_tous_les_tests, axis=(0, 1))
+        r2_variance = np.std(r2_tous_les_tests, axis=(0, 1))
 
         tsnr = Y.mean(axis=0) / (Y.std(axis=0) + 1e-8)
 
