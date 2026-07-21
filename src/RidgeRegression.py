@@ -269,9 +269,13 @@ class RidgeRegression:
         n_features = Y.shape[1]
 
         # Découpage en folds externes (5-6 groupes)
-        n_folds_externes = max(5, round(n_sessions / 6))
-        sous_groupes = np.array_split(sessions, n_folds_externes)
-
+        n_folds_externes = max(4, round(n_sessions / 9))
+        #sous_groupes = np.array_split(sessions, n_folds_externes)
+        
+        rng = np.random.default_rng(42)
+        sessions_shuffled = rng.permutation(sessions)
+        sous_groupes = np.array_split(sessions_shuffled, n_folds_externes)
+        
         liste_numero_test_session = [groupe[0] for groupe in sous_groupes]
         liste_numero_train_val_session = [
             groupe[~np.isin(groupe, liste_numero_test_session)]
@@ -337,7 +341,6 @@ class RidgeRegression:
                     alphas=grille_alphas,
                     alpha_per_target=True,
                     cv=None,
-                    fit_intercept=True,
                 )
                 modele.fit(X_sc_train, Y_sc_train)
 
@@ -366,7 +369,6 @@ class RidgeRegression:
                 alphas=alphas_optimaux,
                 alpha_per_target=True,
                 cv=None,
-                fit_intercept=True,
             )
 
             modele_final.fit(X_scaled_train_final, Y_scaled_train_final)
@@ -384,7 +386,9 @@ class RidgeRegression:
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # shape (n_voxels,)
         r2_variance = np.std(r2_tous_les_tests, axis=0)  # shape (n_voxels,)
 
-        return r2_moyen, r2_variance, r2_tous_les_tests, alphas_tous_externes
+        tsnr = Y.mean(axis=0) / (Y.std(axis=0) + 1e-8)
+
+        return r2_moyen, r2_variance, r2_tous_les_tests, alphas_tous_externes, tsnr
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
@@ -567,8 +571,8 @@ if __name__ == "__main__":
     for SUB in liste_sujets:
         print(f"\n{'='*60}\n  Sujet : {SUB}\n{'='*60}")
 
-        alphas = alphas_par_sujet_voxel[SUB] if flag_precision_voxel else alphas_par_sujet_parcelle[SUB]
-
+        #alphas = alphas_par_sujet_voxel[SUB] if flag_precision_voxel else alphas_par_sujet_parcelle[SUB]
+        alphas = np.logspace(-1, 6, 7)
         # ── Alignement normal ────────────────────────────────────────────────
         ridge = RidgeRegression(
             plateforme, SUB, LAYER,
@@ -577,8 +581,24 @@ if __name__ == "__main__":
         )
 
         print("\n[TEST] nested_cross_validation")
-        ridge.nested_cross_validation(alphas)
+        r2_moyen, r2_variance, r2_tous_les_tests, alphas_tous_externes, tsnr = ridge.nested_cross_validation(alphas)
 
+        alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
+
+        ridge.brain_mapping_r2(r2_moyen,    suffix="_nested_moyen")
+        ridge._brain_mapping_generique(
+            r2_variance, nom_carte="R2_variance", cmap="YlOrRd",
+            treshold=0.0, echelle_log=False,
+            vmin=0, vmax=np.max(r2_variance),
+            suffix="_nested_variance")
+        ridge.brain_mapping_alphas(alphas_moyens, suffix="_nested")
+        ridge.plot_alphas_histogram(alphas_fold=alphas_tous_externes, grille_alphas=alphas, suffix="_nested_folds")
+        ridge.plot_alphas_histogram(alphas_fold=None, grille_alphas=alphas, alphas_finaux=alphas_moyens, suffix="_nested_moyen")
+        ridge._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues",
+                                treshold=0.0, echelle_log=False,
+                                vmin=0, vmax=np.percentile(tsnr, 95),
+                                suffix="_nested")
+        
         """
         print("\n[ÉTAPE 1] Cross-validation — optimisation des alphas")
         scores_r2, r2_fold, alphas_finaux, alphas_fold = ridge.cross_validation(alphas)
