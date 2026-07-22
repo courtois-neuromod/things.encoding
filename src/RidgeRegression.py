@@ -388,7 +388,8 @@ class RidgeRegression:
 
         # AGRÉGATION
         r2_moyen = np.mean(r2_tous_les_tests, axis=(0, 1))
-        r2_variance = np.std(r2_tous_les_tests, axis=(0, 1))
+        r2_variance_inter_folds = np.std(r2_tous_les_tests, axis=1)
+        r2_variance_inter_tests = np.std(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
         tsnr = Y.mean(axis=0) / (Y.std(axis=0) + 1e-8)
@@ -399,7 +400,7 @@ class RidgeRegression:
         print("Y mean :", np.mean(Y))
         print("Y:", Y)
 
-        return r2_moyen, r2_variance, r2_tous_les_tests, alphas_tous_externes_moyen, tsnr
+        return r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests, r2_tous_les_tests, alphas_tous_externes_moyen, tsnr
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
@@ -592,22 +593,18 @@ if __name__ == "__main__":
         )
 
         print("\n[TEST] nested_cross_validation")
-        r2_moyen, r2_variance, r2_tous_les_tests, alphas_tous_externes, tsnr = ridge.nested_cross_validation(alphas)
+        r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests, r2_tous_les_tests, alphas_tous_externes_moyen, tsnr = ridge.nested_cross_validation(alphas)
 
-        alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
+        alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes_moyen), axis=0)
 
         ridge.brain_mapping_r2(r2_moyen,    suffix="_nested_moyen")
-        ridge._brain_mapping_generique(
-            r2_variance, nom_carte="R2_variance", cmap="YlOrRd",
-            treshold=0.0, echelle_log=False,
-            vmin=0, vmax=np.max(r2_variance),
-            suffix="_nested_variance")
-        ridge.brain_mapping_alphas(alphas_moyens, suffix="_nested")
-        ridge.plot_alphas_histogram(alphas_fold=alphas_tous_externes, grille_alphas=alphas, suffix="_nested_folds")
+        print(" Variance inter-tests : ", r2_variance_inter_tests)
+        print(" Variance inter-folds : ", r2_variance_inter_folds)
+        ridge.plot_alphas_histogram(alphas_fold=alphas_tous_externes_moyen, grille_alphas=alphas, suffix="_nested_folds")
         ridge.plot_alphas_histogram(alphas_fold=None, grille_alphas=alphas, alphas_finaux=alphas_moyens, suffix="_nested_moyen")
         ridge._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues",
                                 treshold=0.0, echelle_log=False,
-                                vmin=0, vmax=np.percentile(tsnr, 95),
+                                vmin=0, vmax=np.max(tsnr),
                                 suffix="_nested")
         
         """
