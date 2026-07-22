@@ -388,10 +388,11 @@ class RidgeRegression:
         # AGRÉGATION
         r2_moyen = np.mean(r2_tous_les_tests, axis=(0, 1))
         r2_variance = np.std(r2_tous_les_tests, axis=(0, 1))
+        alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
         tsnr = Y.mean(axis=0) / (Y.std(axis=0) + 1e-8)
 
-        return r2_moyen, r2_variance, r2_tous_les_tests, alphas_tous_externes, tsnr
+        return r2_moyen, r2_variance, r2_tous_les_tests, alphas_tous_externes_moyen, tsnr
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
