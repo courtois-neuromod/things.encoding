@@ -206,10 +206,11 @@ class RidgeRegression:
 
             return runs_ok, X, Y, groupes
 
-    def _selection_X_Y(self, sessions_a_exclure):
+    def _selection_X_Y(self, sessions_a_exclure=None):
         runs_ok, X, Y, groupes = self.create_X_Y_total()
-        masque = ~np.isin(groupes, sessions_a_exclure)
-        X, Y, groupes = X[masque], Y[masque], groupes[masque]
+        if sessions_a_exclure is not None:
+            masque = ~np.isin(groupes, sessions_a_exclure)
+            X, Y, groupes = X[masque], Y[masque], groupes[masque]
         return X, Y, groupes
 
     def _scaler_X_Y(self, X, Y, train_mask, test_mask):
@@ -263,15 +264,15 @@ class RidgeRegression:
 
     def nested_cross_validation(self, grille_alphas):
 
-        X, Y, groupes = self._selection_X_Y([13, 17])
+        X, Y, groupes = self._selection_X_Y()
         sessions = np.unique(groupes)
         n_sessions = len(sessions)
         n_features = Y.shape[1]
 
-        # Découpage en folds externes (4 sous-groupes)
-        n_folds_externes = max(4, round(n_sessions / 9))
+        # Découpage en folds externes (3 sous-groupes)
+        n_folds_externes = 3
         #sous_groupes = np.array_split(sessions, n_folds_externes)
-        liste_seed = [42, 16, 28, 32]
+        liste_seed = [42, 16, 28, 32, 12, 70, 56, 69]
         n_seed = len(liste_seed)
         r2_tous_les_tests = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float64)
