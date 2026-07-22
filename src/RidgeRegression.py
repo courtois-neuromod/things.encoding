@@ -392,7 +392,7 @@ class RidgeRegression:
 
         tsnr = Y.mean(axis=0) / (Y.std(axis=0) + 1e-8)
 
-        print("Y shape :", Y)
+        print("Y shape :", Y.shape)
         print("Y min :", np.min(Y))
         print("Y max :", np.max(Y))
         print("Y mean :", np.mean(Y))
