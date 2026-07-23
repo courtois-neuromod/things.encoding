@@ -462,6 +462,32 @@ class RidgeRegression:
         print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
         print(f"=========================================")
 
+    def plot_r2_distribution(self, r2_moyen, suffix=""):
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        sns.kdeplot(r2_moyen, ax=ax, fill=True, alpha=0.5, linewidth=2, color="#2166ac")
+
+        ax.axvline(0, color="black", linestyle="--", linewidth=1)
+        ax.axvline(np.mean(r2_moyen), color="red", linestyle="--", linewidth=1,
+                   label=f"Moyenne : {np.mean(r2_moyen):.4f}")
+        ax.axvline(np.median(r2_moyen), color="orange", linestyle="--", linewidth=1,
+                   label=f"Médiane : {np.median(r2_moyen):.4f}")
+
+        ax.set_xlabel("R²")
+        ax.set_ylabel("Densité")
+        unite = "voxels" if self.flag_precision_voxel else "parcelles"
+        ax.set_title(f"Distribution des R² — {self.subject} / {self.layer} ({unite})")
+        ax.legend()
+        plt.tight_layout()
+
+        chemins = self.get_path_file_by_plateform(self.plateforme)
+        nom_fichier = f"r2_distribution_{self.subject}_{self.layer}{suffix}.png"
+        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
+        plt.savefig(chemin_sortie, dpi=300)
+        plt.close()
+        print(f"Distribution R² sauvegardée : {chemin_sortie}")
+
+
     def plot_ROImask_histogram(self, scores_finaux, liste_ROI):
         """Trace un boxplot des R² par ROI (voxelwise uniquement) et l'enregistre en HTML."""
         chemins = self.get_path_file_by_plateform(self.plateforme)
@@ -607,7 +633,7 @@ if __name__ == "__main__":
     # et exporte les cartes cérébrales (R², alphas, TSNR) ainsi que les histogrammes.
 
     # --- PARAMÈTRES ---
-    plateforme = ["Roquale", "Mac"]
+    plateforme = ["Rorqual", "Mac"]
     plateforme = plateforme[0]
 
     liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
@@ -662,6 +688,7 @@ if __name__ == "__main__":
                                 treshold=0.0, echelle_log=False,
                                 vmin=0, vmax=np.max(tsnr),
                                 suffix="_nested")
+        ridge.plot_r2_distribution(r2_moyen, suffix="_nested")
         
         """
         print("\n[ÉTAPE 1] Cross-validation — optimisation des alphas")
