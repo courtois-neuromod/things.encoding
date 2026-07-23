@@ -316,7 +316,8 @@ class RidgeRegression:
         # Découpage en folds externes (3 sous-groupes)
         n_folds_externes = 3
         #sous_groupes = np.array_split(sessions, n_folds_externes)
-        liste_seed = [42, 16, 28, 32, 12, 70, 56, 69]
+        #liste_seed = [42, 16, 28, 32, 12, 70, 56, 69]
+        liste_seed = [42, 16]
         n_seed = len(liste_seed)
         r2_tous_les_tests = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float64)
@@ -526,7 +527,7 @@ class RidgeRegression:
         # Figure
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
         fig, ax = plt.subplots(figsize=(10, 5))
-        sns.histplot(data=df, x="log10_alpha", bins=bins, shrink=0.8, ax=ax, **hue_params)
+        sns.lineplot(data=df, x="log10_alpha", bins=bins, shrink=0.8, ax=ax, **hue_params)
         ax.set_xticks(ticks_visibles)
         ax.set_xticklabels([f"{x:.1f}" for x in ticks_visibles], rotation=45)
         ax.set_xlim(xlim_min, xlim_max)
@@ -639,7 +640,7 @@ if __name__ == "__main__":
         print(f"\n{'='*60}\n  Sujet : {SUB}\n{'='*60}")
 
         #alphas = alphas_par_sujet_voxel[SUB] if flag_precision_voxel else alphas_par_sujet_parcelle[SUB]
-        alphas = np.logspace(-1, 6, 7)
+        alphas = np.logspace(-1, 10, 12)
         # ── Alignement normal ────────────────────────────────────────────────
         ridge = RidgeRegression(
             plateforme, SUB, LAYER,
