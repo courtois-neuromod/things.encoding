@@ -3,6 +3,10 @@ Régression Ridge pour l'encodage cérébral THINGS memory.
 Entraîne une RidgeCV par couche et évalue la prédiction.
 """
 from pathlib import Path
+
+from pandas.io.formats.printing import adjoin
+
+from GroupShuffleSplitSession import GroupShuffleSplitSession
 from TribeHDF5Normalization import TribeHDF5Normalization
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV
@@ -290,154 +294,56 @@ class RidgeRegression:
 
         return r2_lots, alphas_lots
 
-    def nested_cross_validation(self, grille_alphas):
-        """Validation croisée imbriquée sur plusieurs seeds.
+    def nested_cross_validation(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
+        """Validation croisée imbriquée optimisée via scikit-learn."""
 
-        Boucle externe : évalue le R² sur une session test jamais vue par le modèle.
-
-        Boucle interne (LeaveOneGroupOut sur les sessions train/val restantes,
-        sessions adjacentes au test exclues) : sélectionne l'alpha optimal par
-        régularisation par moyenne géométrique des alphas des folds internes.
-
-        Le tout est répété sur plusieurs seeds de tirage des folds externes
-        pour estimer la variance des résultats.
-
-        Args:
-            grille_alphas: grille de valeurs d'alpha testées par RidgeCV.
-
-        Returns:
-            tuple: (r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests,
-                r2_tous_les_tests, alphas_tous_externes_moyen, TSNR)
-        """
         X, Y, groupes, TSNR = self._selection_X_Y()
-        sessions = np.unique(groupes)
-        n_sessions = len(sessions)
         n_features = Y.shape[1]
 
-        # Découpage en folds externes (3 sous-groupes)
-        n_folds_externes = 1
-        # sous_groupes = np.array_split(sessions, n_folds_externes)
-        # liste_seed = [42, 16, 28, 32, 12, 70, 56, 69]
-        liste_seed = [42, 16]
-        n_seed = len(liste_seed)
-        r2_tous_les_tests = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float32)
-        alphas_tous_externes = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float64)
+        # 1. Définition des splitters (Externe et Interne)
+        outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
 
-        for index_seed, seed in enumerate(liste_seed):
-            rng = np.random.default_rng(seed)
-            sessions_shuffled = rng.permutation(sessions)
-            sous_groupes = np.array_split(sessions_shuffled, n_folds_externes)
+        # 2. Estimateur (RidgeCV s'occupe de la boucle interne tout seul)
+        estimator = RidgeCV(
+            alphas=grille_alphas,
+            alpha_per_target=True,
+            cv=None
+        )
 
-            liste_numero_test_session = [groupe[0] for groupe in sous_groupes]
-            liste_numero_train_val_session = [
-                groupe[~np.isin(groupe, liste_numero_test_session)]
-                for groupe in sous_groupes
-            ]
+        # 3. Validation croisée externe
+        # Désactiver scoring interne de cross_validate --> mauvaise gestion des tableaux multioutput
+        cv_results = cross_validate(
+            estimator,
+            X,
+            Y,
+            cv=outer_cv,
+            groups=groupes,  # Transmis automatiquement à outer_cv ET estimator.fit
+            return_estimator=True,
+            return_indices=True,
+            n_jobs=-1  # Optionnel : pour paralléliser les folds externes
+        )
 
-            print(f"Sessions disponibles : {sessions}")
-            print(f"Sessions test par fold externe : {liste_numero_test_session}")
+        # 4. Extraction des résultats
+        r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
+        alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
 
-            cv = LeaveOneGroupOut()
+        for i, (model, test_indices) in enumerate(zip(cv_results['estimator'], cv_results['indices']['test'])):
+            # Prédictions sur le test set jamais vu
+            X_test, Y_test = X[test_indices], Y[test_indices]
+            Y_pred = model.predict(X_test)
 
-            # BOUCLE EXTERNE
-            for i_extern, sessions_train_val in enumerate(liste_numero_train_val_session):
+            # Calcul du R2 pour chaque feature (multioutput='raw_values' renvoie un tableau)
+            r2_tous_les_tests[i, :] = r2_score(Y_test, Y_pred, multioutput='raw_values')
 
-                session_test = liste_numero_test_session[i_extern]
-                print(f"\n{'=' * 60}")
-                print(f"[Fold externe {i_extern + 1}/{n_folds_externes}] Test : {session_test}")
+            # Récupération des alphas optimaux choisis par la boucle interne
+            alphas_tous_externes[i, :] = model.alpha_
 
-                # Sessions adjacentes au test set → exclues de la boucle interne
-                idx_test = np.where(sessions == session_test)[0][0]
-                sessions_adjacentes = []
-                if idx_test > 0:
-                    sessions_adjacentes.append(sessions[idx_test - 1])
-                if idx_test < n_sessions - 1:
-                    sessions_adjacentes.append(sessions[idx_test + 1])
-                sessions_adjacentes = np.array(sessions_adjacentes)
-
-                # Sessions utilisables pour la boucle interne
-                sessions_train_val_filtrees = sessions_train_val[
-                    ~np.isin(sessions_train_val, sessions_adjacentes)
-                ]
-                print(f"  Adjacentes exclues : {sessions_adjacentes}")
-                print(f"  Train_val boucle interne : {sessions_train_val_filtrees}")
-
-                train_val_masque = np.isin(groupes, sessions_train_val_filtrees)
-                X_train_val = X[train_val_masque]
-                Y_train_val = Y[train_val_masque]
-                groupe_train_val = groupes[train_val_masque]
-
-                # BOUCLE INTERNE : LeaveOneGroupOut
-                alphas_tous_folds_int = []
-
-                for index_fold, (train_index, val_index) in enumerate(
-                        cv.split(X_train_val, Y_train_val, groupe_train_val)):
-                    session_val = np.unique(groupe_train_val[val_index])[0]
-                    sessions_train = np.unique(groupe_train_val[train_index])
-                    print(f"  [Fold interne {index_fold + 1}] Val : {session_val} | Train : {sessions_train}")
-
-                    train_masque_int = np.zeros(len(X_train_val), dtype=bool)
-                    val_masque_int = np.zeros(len(X_train_val), dtype=bool)
-                    train_masque_int[train_index] = True
-                    val_masque_int[val_index] = True
-
-                    X_sc_train, X_sc_val, Y_sc_train, Y_sc_val = self._scaler_X_Y(
-                        X_train_val, Y_train_val,
-                        train_masque_int, val_masque_int
-                    )
-
-                    modele = RidgeCV(
-                        alphas=grille_alphas,
-                        alpha_per_target=True,
-                        cv=None,
-                    )
-                    modele.fit(X_sc_train, Y_sc_train)
-
-                    Y_pred = modele.predict(X_sc_val)
-                    alphas_int = modele.alpha_
-                    alphas_tous_folds_int.append(alphas_int)
-
-                    del modele, Y_pred
-                    gc.collect()
-
-                # Alphas optimaux = moyenne géométrique sur folds internes
-                alphas_tous_folds_int = np.array(alphas_tous_folds_int)
-                alphas_optimaux = 10 ** np.mean(np.log10(alphas_tous_folds_int), axis=0)
-                alphas_tous_externes[index_seed, i_extern] = alphas_optimaux
-
-                print(f"  → Alphas optimaux — médiane log10 : {np.median(np.log10(alphas_optimaux)):.2f}")
-
-                # ── ÉVALUATION EXTERNE ───────────────────────────────────────────────
-                test_masque = groupes == session_test
-
-                X_scaled_train_final, X_scaled_test, Y_scaled_train_final, Y_scaled_test = self._scaler_X_Y(
-                    X, Y, train_val_masque, test_masque
-                )
-
-                modele_final = RidgeCV(
-                    alphas=alphas_optimaux,
-                    alpha_per_target=True,
-                    cv=None,
-                )
-
-                modele_final.fit(X_scaled_train_final, Y_scaled_train_final)
-
-                Y_pred_test = modele_final.predict(X_scaled_test)
-                r2_test = r2_score(Y_scaled_test, Y_pred_test, multioutput="raw_values")
-
-                r2_tous_les_tests[index_seed, i_extern] = r2_test
-                print(f"  → R² max : {np.max(r2_test):.5f}")
-
-                del modele_final, Y_pred_test
-                gc.collect()
-
-        # AGRÉGATION
-        r2_moyen = np.mean(r2_tous_les_tests, axis=(0, 1))
-        r2_variance_inter_folds = np.mean(np.std(r2_tous_les_tests, axis=1))
-        r2_variance_inter_tests = np.mean(np.std(r2_tous_les_tests, axis=0))
+        # 5. Calcul des métriques finales
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)
+        r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
-        return r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests, r2_tous_les_tests, alphas_tous_externes_moyen, TSNR, liste_seed
+        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
@@ -615,7 +521,7 @@ class RidgeRegression:
         """Enregistre la carte cérébrale des alphas optimaux (échelle log10)."""
         self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True, suffix=suffix)
 
-    def brain_mapping_tsnr(self, suffix=""):
+    def brain_mapping_tsnr(self, tsnr, suffix=""):
         """Enregistre la carte cérébrale correspondante."""
         # évite que les valeurs extrêmes écrasent la colorbar
         self._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues", treshold=0.0, echelle_log=False,vmin=0,vmax=np.percentile(tsnr, 95),suffix=suffix,)
@@ -667,20 +573,20 @@ if __name__ == "__main__":
         )
 
         print("\n[TEST] nested_cross_validation")
-        r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests, r2_tous_les_tests, alphas_tous_externes_moyen, tsnr = ridge.nested_cross_validation(alphas)
+        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, tsnr = ridge.nested_cross_validation(alphas)
 
-        alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes_moyen), axis=0)
+        # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
+        alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
 
         ridge.brain_mapping_r2(r2_moyen,    suffix="_nested_moyen")
-        print(" Variance inter-tests : ", r2_variance_inter_tests)
         print(" Variance inter-folds : ", r2_variance_inter_folds)
-        ridge.plot_alphas_histogram(alphas_fold=alphas_tous_externes_moyen, grille_alphas=alphas, suffix="_nested_folds")
+        ridge.plot_alphas_histogram(alphas_fold=alphas_tous_externes, grille_alphas=alphas, suffix="_nested_folds")
         ridge.plot_alphas_histogram(alphas_fold=None, grille_alphas=alphas, alphas_finaux=alphas_moyens, suffix="_nested_moyen")
         ridge._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues",
                                 treshold=0.0, echelle_log=False,
                                 vmin=0, vmax=np.max(tsnr),
                                 suffix="_nested")
-        ridge.plot_r2_distribution(r2_moyen, suffix="_nested")
+        ridge.plot_r2_distribution(r2_tous_les_tests, liste_seed=list(range(len(r2_tous_les_tests))), suffix="_nested")
         
         """
         print("\n[ÉTAPE 1] Cross-validation — optimisation des alphas")
