@@ -9,6 +9,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import make_scorer, r2_score
 from sklearn.model_selection import LeaveOneGroupOut, cross_validate
+from sklearn.model_selection import GroupShuffleSplit
 import numpy as np
 import pandas as pd
 import h5py
@@ -306,7 +307,7 @@ class RidgeRegression:
 
         Returns:
             tuple: (r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests,
-                r2_tous_les_tests, alphas_tous_externes_moyen, tsnr)
+                r2_tous_les_tests, alphas_tous_externes_moyen, TSNR)
         """
         X, Y, groupes, TSNR = self._selection_X_Y()
         sessions = np.unique(groupes)
@@ -314,15 +315,14 @@ class RidgeRegression:
         n_features = Y.shape[1]
 
         # Découpage en folds externes (3 sous-groupes)
-        n_folds_externes = 3
-        #sous_groupes = np.array_split(sessions, n_folds_externes)
-        #liste_seed = [42, 16, 28, 32, 12, 70, 56, 69]
+        n_folds_externes = 1
+        # sous_groupes = np.array_split(sessions, n_folds_externes)
+        # liste_seed = [42, 16, 28, 32, 12, 70, 56, 69]
         liste_seed = [42, 16]
         n_seed = len(liste_seed)
         r2_tous_les_tests = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_seed, n_folds_externes, n_features), dtype=np.float64)
 
-        
         for index_seed, seed in enumerate(liste_seed):
             rng = np.random.default_rng(seed)
             sessions_shuffled = rng.permutation(sessions)
@@ -437,15 +437,7 @@ class RidgeRegression:
         r2_variance_inter_tests = np.mean(np.std(r2_tous_les_tests, axis=0))
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
-        tsnr = Y.mean(axis=0) / (Y.std(axis=0) + 1e-8)
-
-        print("Y shape :", Y.shape)
-        print("Y min :", np.min(Y))
-        print("Y max :", np.max(Y))
-        print("Y mean :", np.mean(Y))
-        print("Y:", Y)
-
-        return r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests, r2_tous_les_tests, alphas_tous_externes_moyen, tsnr
+        return r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests, r2_tous_les_tests, alphas_tous_externes_moyen, TSNR
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
@@ -462,30 +454,13 @@ class RidgeRegression:
         print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
         print(f"=========================================")
 
-    def plot_r2_distribution(self, r2_moyen, suffix=""):
-        fig, ax = plt.subplots(figsize=(10, 5))
-
-        sns.kdeplot(r2_moyen, ax=ax, fill=True, alpha=0.5, linewidth=2, color="#2166ac")
-
-        ax.axvline(0, color="black", linestyle="--", linewidth=1)
-        ax.axvline(np.mean(r2_moyen), color="red", linestyle="--", linewidth=1,
-                   label=f"Moyenne : {np.mean(r2_moyen):.4f}")
-        ax.axvline(np.median(r2_moyen), color="orange", linestyle="--", linewidth=1,
-                   label=f"Médiane : {np.median(r2_moyen):.4f}")
-
-        ax.set_xlabel("R²")
-        ax.set_ylabel("Densité")
-        unite = "voxels" if self.flag_precision_voxel else "parcelles"
-        ax.set_title(f"Distribution des R² — {self.subject} / {self.layer} ({unite})")
-        ax.legend()
-        plt.tight_layout()
-
-        chemins = self.get_path_file_by_plateform(self.plateforme)
-        nom_fichier = f"r2_distribution_{self.subject}_{self.layer}{suffix}.png"
-        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
-        plt.savefig(chemin_sortie, dpi=300)
-        plt.close()
-        print(f"Distribution R² sauvegardée : {chemin_sortie}")
+    def plot_r2_distribution(self, r2_tous_les_tests, suffix=""):
+        r2 = r2_tous_les_tests.squeeze()  # (n_seeds, n_features)
+        rows = [{"r2": r2, "seed": f"seed_{index_seed + 1}"}
+                for index_seed, seed_vals in enumerate(r2)
+                for r2 in seed_vals]
+        df = pd.DataFrame(rows)
+        print(df)
 
 
     def plot_ROImask_histogram(self, scores_finaux, liste_ROI):
@@ -542,7 +517,7 @@ class RidgeRegression:
                     for i, fold in enumerate(alphas_fold) for v in fold]
             df = pd.DataFrame(rows)
             log10_valeurs = np.log10(alphas_fold.flatten())
-            hue_params = {"hue": "fold", "multiple": "stack", "palette": "tab20"}
+            hue_params = {"hue": "fold", "multiple": "dodge", "palette": "tab20"}
             titre = "Distribution des alphas par fold"
 
         # Limites et ticks communs
