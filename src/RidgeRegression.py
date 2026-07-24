@@ -437,7 +437,7 @@ class RidgeRegression:
         r2_variance_inter_tests = np.mean(np.std(r2_tous_les_tests, axis=0))
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
-        return r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests, r2_tous_les_tests, alphas_tous_externes_moyen, TSNR
+        return r2_moyen, r2_variance_inter_folds, r2_variance_inter_tests, r2_tous_les_tests, alphas_tous_externes_moyen, TSNR, liste_seed
 
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
@@ -454,13 +454,30 @@ class RidgeRegression:
         print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
         print(f"=========================================")
 
-    def plot_r2_distribution(self, r2_tous_les_tests, suffix=""):
+    def plot_r2_distribution(self, r2_tous_les_tests,liste_seed, suffix=""):
         r2 = r2_tous_les_tests.squeeze()  # (n_seeds, n_features)
-        rows = [{"r2": r2, "seed": f"seed_{index_seed + 1}"}
-                for index_seed, seed_vals in enumerate(r2)
-                for r2 in seed_vals]
-        df = pd.DataFrame(rows)
-        print(df)
+        data_seed_r2 = [{"seed": f"seed_{seed}", "r2": r2_val}
+                for seed, seed_vals in zip(liste_seed, r2)
+                for r2_val in seed_vals]
+        df = pd.DataFrame(data_seed_r2)
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        sns.kdeplot(data=df, x="r2", hue="seed", fill=True, alpha=0.25,
+                    common_norm=False, linewidth=2, ax=ax)
+
+        ax.axvline(0, color="black", linestyle="--", linewidth=1)
+        ax.set_xlabel("R²")
+        ax.set_ylabel("Densité")
+        unite = "voxels" if self.flag_precision_voxel else "parcelles"
+        ax.set_title(f"Distribution des R² par seed — {self.subject} / {self.layer} ({unite})")
+        plt.tight_layout()
+
+        chemins = self.get_path_file_by_plateform(self.plateforme)
+        nom_fichier = f"r2_distribution_{self.subject}_{self.layer}_{unite}{suffix}.png"
+        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
+        plt.savefig(chemin_sortie, dpi=300)
+        plt.close()
+        print(f"Distribution R² sauvegardée : {chemin_sortie}")
 
 
     def plot_ROImask_histogram(self, scores_finaux, liste_ROI):
