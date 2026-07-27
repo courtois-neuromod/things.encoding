@@ -300,7 +300,7 @@ class RidgeRegression:
         X, Y, groupes, TSNR = self._selection_X_Y()
         n_features = Y.shape[1]
 
-        # 1. Définition des splitters (Externe et Interne)
+        # 1. Définition des splitters (Externe)
         outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
 
         # 2. Estimateur (RidgeCV s'occupe de la boucle interne tout seul)
@@ -360,22 +360,46 @@ class RidgeRegression:
         print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
         print(f"=========================================")
 
-    def plot_r2_distribution(self, r2_tous_les_tests,liste_seed, suffix=""):
-        r2 = r2_tous_les_tests.squeeze()  # (n_seeds, n_features)
-        data_seed_r2 = [{"seed": f"seed_{seed}", "r2": r2_val}
-                for seed, seed_vals in zip(liste_seed, r2)
-                for r2_val in seed_vals]
-        df = pd.DataFrame(data_seed_r2)
+    def plot_r2_distribution(self, r2_tous_les_tests, suffix=""):
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels,)
+        mediane = np.median(r2_moyen)
+        unite = "voxels" if self.flag_precision_voxel else "parcelles"
+
+        # DataFrame long format : une ligne par (fold, voxel)
+        rows = []
+        for i in range(r2_tous_les_tests.shape[0]):
+            for j in range(r2_tous_les_tests.shape[1]):
+                rows.append({"fold": i, "r2": r2_tous_les_tests[i, j]})
+        df_folds = pd.DataFrame(rows)
+
+        # DataFrame pour la moyenne inter-folds
+        df_moyen = pd.DataFrame({"r2": r2_moyen})
 
         fig, ax = plt.subplots(figsize=(10, 5))
-        sns.kdeplot(data=df, x="r2", hue="seed", fill=True, alpha=0.25,
-                    common_norm=False, linewidth=2, ax=ax)
 
-        ax.axvline(0, color="black", linestyle="--", linewidth=1)
-        ax.set_xlabel("R²")
-        ax.set_ylabel("Densité")
-        unite = "voxels" if self.flag_precision_voxel else "parcelles"
-        ax.set_title(f"Distribution des R² par seed — {self.subject} / {self.layer} ({unite})")
+        # Distribution par fold (fond semi-transparent)
+        sns.histplot(
+            data=df_folds, x="r2", hue="fold",
+            bins=100, element="step", fill=True,
+            alpha=0.15, common_norm=False,
+            linewidth=1, ax=ax,
+        )
+
+        # Distribution moyenne inter-folds (au premier plan)
+        sns.histplot(
+            data=df_moyen, x="r2",
+            bins=100, element="step", fill=False,
+            linewidth=2, color="black",
+            label=f"{self.subject} (med {mediane:.3f})",
+            ax=ax,
+        )
+
+        ax.axvline(mediane, color="black", linestyle="--", linewidth=1)
+        ax.axvline(0, color="grey", linestyle=":", linewidth=1)
+        ax.set_xlabel("per-voxel R² (raw)")
+        ax.set_ylabel(f"Nombre de {unite}")
+        ax.set_title(f"Per-voxel R² distribution — {self.subject} / {self.layer} ({unite})")
+        ax.legend()
         plt.tight_layout()
 
         chemins = self.get_path_file_by_plateform(self.plateforme)
@@ -385,37 +409,134 @@ class RidgeRegression:
         plt.close()
         print(f"Distribution R² sauvegardée : {chemin_sortie}")
 
-
     def plot_ROImask_histogram(self, scores_finaux, liste_ROI):
         """Trace un boxplot des R² par ROI (voxelwise uniquement) et l'enregistre en HTML."""
         chemins = self.get_path_file_by_plateform(self.plateforme)
         fichier_ROImask = chemins.chemin_ROImask
 
-        ROIs_noms = []
-        ROIs_vecteur = []
+        # Mapping ROI → famille de couleur
+        familles = {
+            "V1": "early", "V2": "early", "V3": "early",
+            "hv4": "ventral", "V3a": "ventral", "V3b": "ventral",
+            "faceFFA": "face", "faceOFA": "face", "faceSTS": "face",
+            "scenePPA": "scene", "sceneOPA": "scene", "sceneMPA": "scene",
+            "bodyEBA": "body",
+            "dorsalAttention": "lateral", "ventralAttention": "lateral",
+        }
+        palette = {
+            "early": "#1f77b4",
+            "ventral": "#ff7f0e",
+            "lateral": "#2ca02c",
+            "face": "#d62728",
+            "scene": "#e377c2",
+            "body": "#8c564b",
+        }
 
         if self.flag_precision_voxel:
+            rows = []
             with h5py.File(fichier_ROImask, 'r') as fichier:
                 for groupe in fichier.keys():
                     for sous_cle in fichier[groupe].keys():
-                        ROI_dataset = fichier[groupe][sous_cle]
-                        if sous_cle in liste_ROI:
-                            vecteur = ROI_dataset[:].astype(bool)
-                            scores_roi = scores_finaux[vecteur]
-                            ROIs_noms.extend([sous_cle] * len(scores_roi))
-                            ROIs_vecteur.extend(scores_roi)
-                df = pd.DataFrame({"ROI": ROIs_noms, "r2": ROIs_vecteur})
+                        if sous_cle not in liste_ROI:
+                            continue
+                        vecteur = fichier[groupe][sous_cle][:].astype(bool)
+                        r2_roi = scores_finaux[vecteur]
+                        rows.append({
+                            "ROI": sous_cle,
+                            "r2_mean": np.mean(r2_roi),
+                            "famille": familles.get(sous_cle, "autre"),
+                        })
+
+                df = pd.DataFrame(rows).sort_values("r2_mean", ascending=True)
                 print(df.shape)
 
-                fig = px.box(df, x="ROI", y="r2", color="ROI", points="all")
-                fig.update_traces(
-                    marker=dict(opacity=0.3, size=3),
+                fig, ax = plt.subplots(figsize=(8, 10))
+                sns.barplot(
+                    data=df, y="ROI", x="r2_mean",
+                    hue="famille", palette=palette,
+                    dodge=False, ax=ax
                 )
-                fig.write_html(str(chemins.root_encoding / "output" / f"ROImask_{self.subject}.html"))
-            print("Histogramme ROI sauvegardé :", str(chemins.root_encoding / "output" / f"ROImask_{self.subject}.html"))
-            return
+                ax.set_xlabel("mean R² (raw)")
+                ax.set_ylabel("")
+                ax.set_title(f"Encoding accuracy by visual ROI — {self.subject} / {self.layer}")
+                ax.legend(title="stream", bbox_to_anchor=(1.05, 1), loc="upper left")
+                plt.tight_layout()
+
+                nom_fichier = f"ROImask_{self.subject}_{self.layer}.png"
+                plt.savefig(chemins.root_encoding / "output" / nom_fichier, dpi=300, bbox_inches="tight")
+                plt.close()
         else:
             return "Pas en voxel"
+
+    def plot_r2_threshold(self, r2_tous_les_tests, suffix=""):
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels,)
+        unite = "voxels" if self.flag_precision_voxel else "parcelles"
+
+        seuils = np.linspace(r2_moyen.min(), r2_moyen.max(), 300)
+        fractions = [np.mean(r2_moyen >= seuil) for seuil in seuils]
+
+        df = pd.DataFrame({"seuil": seuils, "fraction": fractions})
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        sns.histplot(data=df, x="seuil", y="fraction", linewidth=2, ax=ax)
+
+        ax.axvline(0.0, color="grey", linestyle="--", linewidth=1)
+        ax.axvline(0.05, color="grey", linestyle="--", linewidth=1)
+        ax.axvline(0.10, color="grey", linestyle="--", linewidth=1)
+        ax.set_xlabel("R² threshold")
+        ax.set_ylabel(f"fraction of {unite} ≥ threshold")
+        ax.set_title(f"How many {unite} are well predicted — {self.subject} / {self.layer}")
+        plt.tight_layout()
+
+        chemins = self.get_path_file_by_plateform(self.plateforme)
+        nom_fichier = f"r2_threshold_{self.subject}_{self.layer}_{unite}{suffix}.png"
+        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
+        plt.savefig(chemin_sortie, dpi=300)
+        plt.close()
+        print(f"Threshold R² sauvegardé : {chemin_sortie}")
+
+    def plot_accuracy(self, r2_tous_les_tests):
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels ou n_parcelles,)
+
+        mean = np.mean(r2_moyen)
+        median = np.median(r2_moyen)
+        seuil_top10 = np.percentile(r2_moyen, 90)
+        top10 = np.mean(r2_moyen[r2_moyen >= seuil_top10])
+
+        df = pd.DataFrame({
+            "métrique": ["mean", "median", "top-10% mean"],
+            "valeur": [mean, median, top10],
+        })
+
+        fig, ax = plt.subplots(figsize=(5, 5))
+        sns.barplot(
+            data=df, x="métrique", y="valeur",
+            palette={"mean": "#1f77b4", "median": "#aec7e8", "top-10% mean": "#ffbf00"},
+            ax=ax
+        )
+
+        for bar, val in zip(ax.patches, df["valeur"]):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.002,
+                f"{val:.3f}",
+                ha="center", va="bottom", fontsize=10
+            )
+
+        n_features = r2_moyen.shape[0]
+        ax.set_xlabel(f"{self.subject}\n(n={n_features:,})")
+        ax.set_ylabel("R² (raw)")
+        ax.set_title(f"Per-subject accuracy — {self.subject} / {self.layer}")
+        plt.tight_layout()
+
+        chemins = self.get_path_file_by_plateform(self.plateforme)
+        nom_fichier = f"accuracy_{self.subject}_{self.layer}.png"
+        plt.savefig(chemins.root_encoding / "output" / nom_fichier, dpi=300)
+        plt.close()
+        print(f"Accuracy sauvegardée : {chemins.root_encoding / 'output' / nom_fichier}")
+
+
+
 
     def plot_alphas_histogram(self, alphas_fold, grille_alphas, alphas_finaux=None, suffix=""):
         """Trace la distribution (log10) des alphas sélectionnés et l'enregistre en PNG.
@@ -586,7 +707,7 @@ if __name__ == "__main__":
                                 treshold=0.0, echelle_log=False,
                                 vmin=0, vmax=np.max(tsnr),
                                 suffix="_nested")
-        ridge.plot_r2_distribution(r2_tous_les_tests, liste_seed=list(range(len(r2_tous_les_tests))), suffix="_nested")
+        ridge.plot_r2_distribution(r2_tous_les_tests, suffix="_nested")
         
         """
         print("\n[ÉTAPE 1] Cross-validation — optimisation des alphas")
