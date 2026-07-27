@@ -447,8 +447,6 @@ class RidgeRegression:
             with h5py.File(fichier_ROImask, 'r') as fichier:
                 for groupe in fichier.keys():
                     for sous_cle in fichier[groupe].keys():
-                        if sous_cle not in liste_ROI:
-                            continue
                         vecteur = fichier[groupe][sous_cle][:].astype(bool)
                         r2_roi = scores_finaux[vecteur]
                         rows.append({
