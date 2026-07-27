@@ -5,6 +5,7 @@ Entraîne une RidgeCV par couche et évalue la prédiction.
 from pathlib import Path
 
 from pandas.io.formats.printing import adjoin
+from sklearn.compose import TransformedTargetRegressor
 
 from GroupShuffleSplitSession import GroupShuffleSplitSession
 from TribeHDF5Normalization import TribeHDF5Normalization
@@ -304,14 +305,23 @@ class RidgeRegression:
         outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
 
         # 2. Estimateur (RidgeCV s'occupe de la boucle interne tout seul)
-        estimator = RidgeCV(
+        # a. Le modèle de base
+        ridge = RidgeCV(
             alphas=grille_alphas,
             alpha_per_target=True,
-            cv=None
+            cv=LeaveOneGroupOut()
         )
 
+        # b. Standardiser Y automatiquement
+        model_y_scaled = TransformedTargetRegressor(
+            regressor=ridge,
+            transformer=StandardScaler()
+        )
+
+        estimator = make_pipeline(StandardScaler(), model_y_scaled)
+
         # 3. Validation croisée externe
-        # Désactiver scoring interne de cross_validate --> mauvaise gestion des tableaux multioutput
+        # Désactiver scoring interne de cross_validate
         cv_results = cross_validate(
             estimator,
             X,
@@ -336,7 +346,7 @@ class RidgeRegression:
             r2_tous_les_tests[i, :] = r2_score(Y_test, Y_pred, multioutput='raw_values')
 
             # Récupération des alphas optimaux choisis par la boucle interne
-            alphas_tous_externes[i, :] = model.alpha_
+            alphas_tous_externes[i, :] = model[-1].regressor_.alpha_
 
         # 5. Calcul des métriques finales
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
