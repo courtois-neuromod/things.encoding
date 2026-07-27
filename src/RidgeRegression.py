@@ -295,53 +295,50 @@ class RidgeRegression:
         return r2_lots, alphas_lots
 
     def nested_cross_validation(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
-        """Validation croisée imbriquée optimisée via scikit-learn (sans lots)."""
+        """Validation croisée imbriquée optimisée via scikit-learn."""
 
         X, Y, groupes, TSNR = self._selection_X_Y()
         n_features = Y.shape[1]
 
-        # 1. Splitter externe
+        # 1. Définition des splitters (Externe)
         outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
 
+        # 2. Estimateur (RidgeCV s'occupe de la boucle interne tout seul)
+        estimator = RidgeCV(
+            alphas=grille_alphas,
+            alpha_per_target=True,
+            cv=None
+        )
+
+        # 3. Validation croisée externe
+        # Désactiver scoring interne de cross_validate --> mauvaise gestion des tableaux multioutput
+        cv_results = cross_validate(
+            estimator,
+            X,
+            Y,
+            cv=outer_cv,
+            groups=groupes,  # Transmis automatiquement à outer_cv ET estimator.fit
+            return_estimator=True,
+            return_indices=True,
+            n_jobs=-1  # Optionnel : pour paralléliser les folds externes
+        )
+
+        # 4. Extraction des résultats
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
 
-        # BOUCLE EXTERNE
-        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes)):
-            print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
+        for i, (model, test_indices) in enumerate(zip(cv_results['estimator'], cv_results['indices']['test'])):
+            # Prédictions sur le test set jamais vu
+            X_test, Y_test = X[test_indices], Y[test_indices]
+            Y_pred = model.predict(X_test)
 
-            # 2. Récupération des identifiants de sessions pour la boucle interne
-            groupes_train = groupes[train_idx]
+            # Calcul du R2 pour chaque feature (multioutput='raw_values' renvoie un tableau)
+            r2_tous_les_tests[i, :] = r2_score(Y_test, Y_pred, multioutput='raw_values')
 
-            # 3. Standardisation stricte (X et Y)
-            X_train_scaled, X_test_scaled, Y_train_scaled, Y_test_scaled = self._scaler_X_Y(
-                X, Y, train_idx, test_idx
-            )
+            # Récupération des alphas optimaux choisis par la boucle interne
+            alphas_tous_externes[i, :] = model.alpha_
 
-            # 4. Création des splits internes par blocs de sessions
-            inner_cv = LeaveOneGroupOut()
-            inner_splits = list(inner_cv.split(X_train_scaled, Y_train_scaled, groups=groupes_train))
-
-            # 5. Définition et entraînement du modèle (En une seule passe)
-            estimator = RidgeCV(
-                alphas=grille_alphas,
-                alpha_per_target=True,
-                cv=inner_splits
-            )
-
-            estimator.fit(X_train_scaled, Y_train_scaled)
-
-            # 6. Évaluation immédiate sur le test set
-            Y_pred = estimator.predict(X_test_scaled)
-
-            # 7. Stockage des scores et alphas
-            r2_tous_les_tests[i, :] = r2_score(Y_test_scaled, Y_pred, multioutput='raw_values')
-            alphas_tous_externes[i, :] = estimator.alpha_
-
-            del estimator, Y_pred, X_train_scaled, X_test_scaled, Y_train_scaled, Y_test_scaled
-            gc.collect()
-
-        # Calcul des métriques finales
+        # 5. Calcul des métriques finales
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
@@ -440,6 +437,8 @@ class RidgeRegression:
             with h5py.File(fichier_ROImask, 'r') as fichier:
                 for groupe in fichier.keys():
                     for sous_cle in fichier[groupe].keys():
+                        if sous_cle not in liste_ROI:
+                            continue
                         vecteur = fichier[groupe][sous_cle][:].astype(bool)
                         r2_roi = scores_finaux[vecteur]
                         rows.append({
@@ -725,6 +724,7 @@ if __name__ == "__main__":
         # 4. Analyse par Région d'Intérêt (ROI)
         print(" -> Création de l'analyse par ROI...")
         if flag_precision_voxel:
+            # Cette fonction nécessite les données au niveau du voxel
             ridge.plot_ROImask_histogram(r2_moyen)
         else:
             print(" -> (Ignoré : l'analyse par ROI nécessite flag_precision_voxel = True)")
