@@ -4,9 +4,6 @@ Entraîne une RidgeCV par couche et évalue la prédiction.
 """
 from pathlib import Path
 
-from pandas.io.formats.printing import adjoin
-from sklearn.compose import TransformedTargetRegressor
-
 from GroupShuffleSplitSession import GroupShuffleSplitSession
 from TribeHDF5Normalization import TribeHDF5Normalization
 from sklearn.preprocessing import StandardScaler
@@ -14,7 +11,8 @@ from sklearn.linear_model import RidgeCV
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import make_scorer, r2_score
 from sklearn.model_selection import LeaveOneGroupOut, cross_validate
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.compose import TransformedTargetRegressor
+from sklearn.multioutput import MultiOutputRegressor
 import numpy as np
 import pandas as pd
 import h5py
@@ -25,9 +23,7 @@ import matplotlib
 from matplotlib.ticker import FuncFormatter
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-import plotly.express as px
 import seaborn as sns
-from sklearn.model_selection import GroupKFold
 
 matplotlib.use('Agg')
 
@@ -305,16 +301,18 @@ class RidgeRegression:
         outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
 
         # 2. Estimateur (RidgeCV s'occupe de la boucle interne tout seul)
-        # a. Le modèle de base
+        # a. Le modèle de base : On utilise pas que RidgeCV car on ne peut pas faire LeaveOneGroupOut et alpha_per_target en même temps. On remplace par MultiOutputRegressor qui fait une RidgeCV par parcelle ou voxel
         ridge = RidgeCV(
             alphas=grille_alphas,
-            alpha_per_target=True,
             cv=LeaveOneGroupOut()
         )
 
+        # b. On clone RidgeCV pour chacune des parcelles / voxels
+        multi_ridge = MultiOutputRegressor(ridge, n_jobs=1)
+
         # b. Standardiser Y automatiquement
         model_y_scaled = TransformedTargetRegressor(
-            regressor=ridge,
+            regressor=multi_ridge,
             transformer=StandardScaler()
         )
 
@@ -346,7 +344,7 @@ class RidgeRegression:
             r2_tous_les_tests[i, :] = r2_score(Y_test, Y_pred, multioutput='raw_values')
 
             # Récupération des alphas optimaux choisis par la boucle interne
-            alphas_tous_externes[i, :] = model[-1].regressor_.alpha_
+            alphas_tous_externes[i, :] = [est.alpha_ for est in model[-1].regressor_.estimators_]
 
         # 5. Calcul des métriques finales
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
@@ -702,7 +700,7 @@ if __name__ == "__main__":
         )
 
         print("\n[TEST] nested_cross_validation")
-        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, tsnr = ridge.nested_cross_validation(alphas)
+        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, tsnr = ridge.nested_cross_validation(alphas, 10, 0.1)
 
         # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
         alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
