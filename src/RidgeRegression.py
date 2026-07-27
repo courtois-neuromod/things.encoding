@@ -292,67 +292,71 @@ class RidgeRegression:
         return r2_lots, alphas_lots
 
     def nested_cross_validation(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
-        """Validation croisée imbriquée optimisée via scikit-learn."""
+        """Validation croisée imbriquée optimisée (Boucle explicite anti-fuite)."""
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.model_selection import LeaveOneGroupOut
+        from sklearn.linear_model import RidgeCV
+        from sklearn.multioutput import MultiOutputRegressor
+        from sklearn.metrics import r2_score
+        import gc
 
         X, Y, groupes, TSNR = self._selection_X_Y()
         n_features = Y.shape[1]
 
-        # 1. Définition des splitters (Externe)
+        # 1. Définition du splitter externe
         outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
 
-        # 2. Estimateur (RidgeCV s'occupe de la boucle interne tout seul)
-        # a. Le modèle de base : On utilise pas que RidgeCV car on ne peut pas faire LeaveOneGroupOut et alpha_per_target en même temps. On remplace par MultiOutputRegressor qui fait une RidgeCV par parcelle ou voxel
-        ridge = RidgeCV(
-            alphas=grille_alphas,
-            cv=LeaveOneGroupOut()
-        )
-
-        # b. On clone RidgeCV pour chacune des parcelles / voxels
-        multi_ridge = MultiOutputRegressor(ridge, n_jobs=1)
-
-        # b. Standardiser Y automatiquement
-        model_y_scaled = TransformedTargetRegressor(
-            regressor=multi_ridge,
-            transformer=StandardScaler()
-        )
-
-        estimator = make_pipeline(StandardScaler(), model_y_scaled)
-
-        # 3. Validation croisée externe
-        # Désactiver scoring interne de cross_validate
-        cv_results = cross_validate(
-            estimator,
-            X,
-            Y,
-            cv=outer_cv,
-            groups=groupes,  # Transmis automatiquement à outer_cv ET estimator.fit
-            return_estimator=True,
-            return_indices=True,
-            n_jobs=-1  # Optionnel : pour paralléliser les folds externes
-        )
-
-        # 4. Extraction des résultats
+        # 2. Préparation des tableaux de résultats
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
 
-        for i, (model, test_indices) in enumerate(zip(cv_results['estimator'], cv_results['indices']['test'])):
-            # Prédictions sur le test set jamais vu
-            X_test, Y_test = X[test_indices], Y[test_indices]
-            Y_pred = model.predict(X_test)
+        # 3. BOUCLE EXTERNE MANUELLE (Évite les bugs de routage de cross_validate)
+        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes)):
+            print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
 
-            # Calcul du R2 pour chaque feature (multioutput='raw_values' renvoie un tableau)
-            r2_tous_les_tests[i, :] = r2_score(Y_test, Y_pred, multioutput='raw_values')
+            X_train, Y_train, groupes_train = X[train_idx], Y[train_idx], groupes[train_idx]
+            X_test, Y_test = X[test_idx], Y[test_idx]
 
-            # Récupération des alphas optimaux choisis par la boucle interne
-            alphas_tous_externes[i, :] = [est.alpha_ for est in model[-1].regressor_.estimators_]
+            # A. Standardisation stricte
+            scaler_X = StandardScaler()
+            X_train_scaled = scaler_X.fit_transform(X_train)
+            X_test_scaled = scaler_X.transform(X_test)
 
-        # 5. Calcul des métriques finales
+            scaler_Y = StandardScaler()
+            Y_train_scaled = scaler_Y.fit_transform(Y_train)
+            Y_test_scaled = scaler_Y.transform(Y_test)
+
+            # B. Purge temporelle : création des splits internes pré-calculés
+            # Le fait de pré-calculer les splits évite à RidgeCV d'avoir besoin de la variable "groups"
+            inner_cv = LeaveOneGroupOut()
+            inner_splits = list(inner_cv.split(X_train_scaled, Y_train_scaled, groups=groupes_train))
+
+            # C. Estimateur : Un RidgeCV par parcelle/voxel (MultiOutputRegressor remplace alpha_per_target)
+            ridge = RidgeCV(alphas=grille_alphas, cv=inner_splits)
+
+            multi_ridge = MultiOutputRegressor(ridge, n_jobs=-1)
+
+            # D. Entraînement
+            multi_ridge.fit(X_train_scaled, Y_train_scaled)
+
+            # E. Évaluation sur le test set
+            Y_pred_scaled = multi_ridge.predict(X_test_scaled)
+
+            # F. Calcul du R2 sur les données standardisées
+            r2_tous_les_tests[i, :] = r2_score(Y_test_scaled, Y_pred_scaled, multioutput='raw_values')
+
+            # G. Extraction des alphas de chaque sous-modèle
+            alphas_tous_externes[i, :] = [est.alpha_ for est in multi_ridge.estimators_]
+
+            del multi_ridge, Y_pred_scaled, X_train_scaled, X_test_scaled, Y_train_scaled, Y_test_scaled
+            gc.collect()
+
+        # 4. Calcul des métriques finales
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
-
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
         """Affiche un résumé (moyenne, médiane, max, part de R² positifs) des scores R²."""
