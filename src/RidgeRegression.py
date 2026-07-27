@@ -409,7 +409,7 @@ class RidgeRegression:
         plt.close()
         print(f"Distribution R² sauvegardée : {chemin_sortie}")
 
-    def plot_ROImask_histogram(self, scores_finaux, liste_ROI):
+    def plot_ROImask_histogram(self, scores_finaux):
         """Trace un boxplot des R² par ROI (voxelwise uniquement) et l'enregistre en HTML."""
         chemins = self.get_path_file_by_plateform(self.plateforme)
         fichier_ROImask = chemins.chemin_ROImask
@@ -572,7 +572,7 @@ class RidgeRegression:
         # Figure
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
         fig, ax = plt.subplots(figsize=(10, 5))
-        sns.lineplot(data=df, x="log10_alpha", bins=bins, shrink=0.8, ax=ax, **hue_params)
+        sns.histplot(data=df, x="log10_alpha", bins=bins, shrink=0.8, ax=ax, **hue_params)
         ax.set_xticks(ticks_visibles)
         ax.set_xticklabels([f"{x:.1f}" for x in ticks_visibles], rotation=45)
         ax.set_xlim(xlim_min, xlim_max)
@@ -699,16 +699,37 @@ if __name__ == "__main__":
         # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
         alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
 
-        ridge.brain_mapping_r2(r2_moyen,    suffix="_nested_moyen")
-        print(" Variance inter-folds : ", r2_variance_inter_folds)
+        print(f"Variance inter-folds moyenne : {np.mean(r2_variance_inter_folds):.6f}")
+
+        # ── Génération de l'ensemble des figures ──────────────────────────
+        print("\n[GÉNÉRATION DES FIGURES]")
+
+        # 1. Cartes Cérébrales (Nilearn 3D)
+        print(" -> Création des cartes cérébrales (R², Alphas, TSNR)...")
+        ridge.brain_mapping_r2(r2_moyen, suffix="_nested_moyen")
+        ridge.brain_mapping_alphas(alphas_moyens, suffix="_nested_moyen")
+        ridge.brain_mapping_tsnr(tsnr, suffix="_nested")
+
+        # 2. Histogrammes des paramètres de régularisation (Alphas)
+        print(" -> Création des histogrammes des alphas...")
         ridge.plot_alphas_histogram(alphas_fold=alphas_tous_externes, grille_alphas=alphas, suffix="_nested_folds")
         ridge.plot_alphas_histogram(alphas_fold=None, grille_alphas=alphas, alphas_finaux=alphas_moyens, suffix="_nested_moyen")
-        ridge._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues",
-                                treshold=0.0, echelle_log=False,
-                                vmin=0, vmax=np.max(tsnr),
-                                suffix="_nested")
+
+        # 3. Métriques de performance R²
+        print(" -> Création des graphiques de distribution de l'accuracy...")
         ridge.plot_r2_distribution(r2_tous_les_tests, suffix="_nested")
-        
+        ridge.plot_r2_threshold(r2_tous_les_tests, suffix="_nested")
+        ridge.plot_accuracy(r2_tous_les_tests)
+
+        # 4. Analyse par Région d'Intérêt (ROI)
+        print(" -> Création de l'analyse par ROI...")
+        if flag_precision_voxel:
+            # Cette fonction nécessite les données au niveau du voxel
+            ridge.plot_ROImask_histogram(r2_moyen)
+        else:
+            print(" -> (Ignoré : l'analyse par ROI nécessite flag_precision_voxel = True)")
+
+        print(f"\nTerminé pour le sujet {SUB}. Toutes les figures ont été sauvegardées.")
         """
         print("\n[ÉTAPE 1] Cross-validation — optimisation des alphas")
         scores_r2, r2_fold, alphas_finaux, alphas_fold = ridge.cross_validation(alphas)
