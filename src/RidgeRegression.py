@@ -24,6 +24,11 @@ from matplotlib.ticker import FuncFormatter
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 import seaborn as sns
+import warnings
+from scipy.linalg import LinAlgWarning
+
+# Ignore spécifiquement les avertissements de matrices mal conditionnées
+warnings.filterwarnings(action='ignore', category=LinAlgWarning)
 
 matplotlib.use('Agg')
 
