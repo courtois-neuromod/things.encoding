@@ -375,7 +375,10 @@ class RidgeRegression:
             Y_pred_scaled = ridge_final.predict(X_test_scaled)
 
             # Calcul du score R2
-            r2_tous_les_tests[i, :] = r2_score(Y_test_scaled, Y_pred_scaled, multioutput='raw_values')
+            r2_score_fold = r2_score(Y_test_scaled, Y_pred_scaled, multioutput='raw_values')
+            r2_tous_les_tests[i, :] = r2_score_fold
+            print(f"-> R2 mean : {np.mean(r2_score_fold)}")
+            print(f"-> R2 max : {np.max(r2_score_fold)}")
 
             # Nettoyage mémoire
             del ridge_final, Y_pred_scaled
