@@ -419,14 +419,6 @@ class RidgeRegression:
 
         fig, ax = plt.subplots(figsize=(10, 5))
 
-        # Distribution par fold (fond semi-transparent)
-        sns.histplot(
-            data=df_folds, x="r2", hue="fold",
-            bins=100, element="step", fill=True,
-            alpha=0.15, common_norm=False,
-            linewidth=1, ax=ax,
-        )
-
         # Distribution moyenne inter-folds (au premier plan)
         sns.histplot(
             data=df_moyen, x="r2",
@@ -512,20 +504,37 @@ class RidgeRegression:
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels,)
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
 
-        seuils = np.linspace(r2_moyen.min(), r2_moyen.max(), 300)
+        # On démarre à 0 (comme sur l'image) jusqu'au R2 maximum
+        max_r2 = r2_moyen.max() if r2_moyen.max() > 0 else 0.3
+        seuils = np.linspace(0.0, max_r2, 300)
         fractions = [np.mean(r2_moyen >= seuil) for seuil in seuils]
 
-        df = pd.DataFrame({"seuil": seuils, "fraction": fractions})
+        fig, ax = plt.subplots(figsize=(8, 6))
 
-        fig, ax = plt.subplots(figsize=(8, 5))
-        sns.histplot(data=df, x="seuil", y="fraction", linewidth=2, ax=ax)
+        # Ajout de la grille légère en arrière-plan
+        ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
+        ax.set_axisbelow(True)
 
-        ax.axvline(0.0, color="grey", linestyle="--", linewidth=1)
-        ax.axvline(0.05, color="grey", linestyle="--", linewidth=1)
-        ax.axvline(0.10, color="grey", linestyle="--", linewidth=1)
-        ax.set_xlabel("R² threshold")
-        ax.set_ylabel(f"fraction of {unite} ≥ threshold")
-        ax.set_title(f"How many {unite} are well predicted — {self.subject} / {self.layer}")
+        # Tracé de la courbe
+        ax.plot(seuils, fractions, linewidth=2.5, color="#0072B2", label=self.subject)
+
+        # Lignes verticales de repère (transparentes et pointillées)
+        ax.axvline(0.05, color="grey", linestyle="--", linewidth=1, alpha=0.5)
+        ax.axvline(0.10, color="grey", linestyle="--", linewidth=1, alpha=0.5)
+
+        # Nettoyage de l'esthétique (retrait des bordures haut et droite)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        ax.set_xlabel("R² threshold", fontsize=12)
+        ax.set_ylabel(f"fraction of {unite} ≥ threshold", fontsize=12)
+
+        # Titre centré et en gras
+        ax.set_title(f"How many {unite} are well predicted", fontsize=14, fontweight='bold')
+
+        # Légende (en haut à droite, sans cadre)
+        ax.legend(frameon=False, loc="upper right")
+
         plt.tight_layout()
 
         chemins = self.get_path_file_by_plateform(self.plateforme)
@@ -537,45 +546,63 @@ class RidgeRegression:
 
     def plot_accuracy(self, r2_tous_les_tests):
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels ou n_parcelles,)
+        n_features = r2_moyen.shape[0]
 
         mean = np.mean(r2_moyen)
         median = np.median(r2_moyen)
         seuil_top10 = np.percentile(r2_moyen, 90)
         top10 = np.mean(r2_moyen[r2_moyen >= seuil_top10])
 
+        # Création du label pour l'axe X (Sujet + N)
+        x_label = f"{self.subject}\n(n={n_features:,})"
+
+        # Restructuration du DataFrame pour utiliser le paramètre 'hue' de Seaborn
         df = pd.DataFrame({
-            "métrique": ["mean", "median", "top-10% mean"],
-            "valeur": [mean, median, top10],
+            "Sujet": [x_label, x_label, x_label],
+            "Métrique": ["mean", "median", "top-10% mean"],
+            "R2": [mean, median, top10],
         })
 
-        fig, ax = plt.subplots(figsize=(5, 5))
+        fig, ax = plt.subplots(figsize=(6, 6))
+
+        # Ajout de la grille légère en arrière-plan (comme sur l'image)
+        ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
+        ax.set_axisbelow(True)  # S'assure que la grille reste derrière les barres
+
+        # Couleurs fidèles à votre image de référence
+        palette = {"mean": "#0072B2", "median": "#56B4E9", "top-10% mean": "#E69F00"}
+
+        # Le 'hue' crée la légende automatiquement et groupe les barres
         sns.barplot(
-            data=df, x="métrique", y="valeur",
-            palette={"mean": "#1f77b4", "median": "#aec7e8", "top-10% mean": "#ffbf00"},
-            ax=ax
+            data=df, x="Sujet", y="R2", hue="Métrique",
+            palette=palette, ax=ax
         )
 
-        for bar, val in zip(ax.patches, df["valeur"]):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.002,
-                f"{val:.3f}",
-                ha="center", va="bottom", fontsize=10
-            )
+        # Annotation automatique et propre des valeurs sur les barres
+        for container in ax.containers:
+            ax.bar_label(container, fmt='%.3f', padding=3, fontsize=10)
 
-        n_features = r2_moyen.shape[0]
-        ax.set_xlabel(f"{self.subject}\n(n={n_features:,})")
-        ax.set_ylabel("R² (raw)")
-        ax.set_title(f"Per-subject accuracy — {self.subject} / {self.layer}")
+        # Nettoyage de l'esthétique (retrait des bordures haut et droite)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        ax.set_xlabel("")  # On laisse vide car le label du tick suffit
+        ax.set_ylabel("R² (raw)", fontsize=12)
+
+        # Titre centré et en gras
+        ax.set_title(f"Per-subject accuracy — {self.subject} / {self.layer}", fontsize=14, fontweight='bold')
+
+        # Positionnement de la légende (sans cadre, en haut à gauche)
+        ax.legend(title="", frameon=False, loc="upper left")
+
         plt.tight_layout()
 
         chemins = self.get_path_file_by_plateform(self.plateforme)
         nom_fichier = f"accuracy_{self.subject}_{self.layer}.png"
-        plt.savefig(chemins.root_encoding / "output" / nom_fichier, dpi=300)
+        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
+        plt.savefig(chemin_sortie, dpi=300)
         plt.close()
-        print(f"Accuracy sauvegardée : {chemins.root_encoding / 'output' / nom_fichier}")
-
-
+        print(f"Accuracy sauvegardée : {chemin_sortie}")
 
 
     def plot_alphas_histogram(self, alphas_fold, grille_alphas, alphas_finaux=None, suffix=""):
@@ -725,7 +752,7 @@ if __name__ == "__main__":
         print(f"\n{'='*60}\n  Sujet : {SUB}\n{'='*60}")
 
         #alphas = alphas_par_sujet_voxel[SUB] if flag_precision_voxel else alphas_par_sujet_parcelle[SUB]
-        alphas = np.logspace(-1, 10, 12)
+        alphas = np.logspace(-1, 10, 20)
         # ── Alignement normal ────────────────────────────────────────────────
         ridge = RidgeRegression(
             plateforme, SUB, LAYER,
