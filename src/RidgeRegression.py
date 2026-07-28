@@ -389,7 +389,7 @@ class RidgeRegression:
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
-        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
+        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, TSNR
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
         """Affiche un résumé (moyenne, médiane, max, part de R² positifs) des scores R²."""
@@ -764,7 +764,7 @@ if __name__ == "__main__":
         )
 
         print("\n[TEST] nested_cross_validation")
-        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, tsnr = ridge.nested_cross_validation(alphas, 10, 0.1)
+        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, tsnr = ridge.nested_cross_validation(alphas, 1, 0.1)
 
         # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
         alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
@@ -783,6 +783,8 @@ if __name__ == "__main__":
         # 2. Histogrammes des paramètres de régularisation (Alphas)
         print(" -> Création des histogrammes des alphas...")
         ridge.plot_alphas_histogram(alphas_fold=alphas_tous_externes, grille_alphas=alphas, suffix="_nested_folds")
+        print("Best Alphas Inner : ", best_alphas_inner)
+        ridge.plot_alphas_histogram(alphas_fold=best_alphas_inner, grille_alphas=alphas, suffix="_nested_folds_inner")
         ridge.plot_alphas_histogram(alphas_fold=None, grille_alphas=alphas, alphas_finaux=alphas_moyens, suffix="_nested_moyen")
 
         # 3. Métriques de performance R²
