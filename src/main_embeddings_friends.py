@@ -24,8 +24,10 @@ def sync_time():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Extraction des latents TRIBE v2')
     parser.add_argument('--season', type=int, required=True, help='Identifiant de la saison à traiter')
+    parser.add_argument('--episode', type=int, required=True, help="Identifiant de l'episode à traiter")
     args = parser.parse_args()
     season = args.season
+    episode = args.episode
 
     #warnings.filterwarnings("ignore")
     #logging.disable(logging.CRITICAL)
@@ -57,20 +59,20 @@ if __name__ == '__main__':
 
     t1 = sync_time()
     writer = HDF5Writer(HDF5_DIR)
-    video_files = sorted(DATA_DIR.glob(f"friends_s{season:02d}e*[abc].mkv"))
+    video_files = sorted(DATA_DIR.glob(f"friends_s{season:02d}e{episode:02d}[abc].mkv"))
     t_recherche_video = sync_time() - t1
     print(f"Saison {season} --> {len(video_files)} vidéos trouvées en {t_recherche_video:.2f} secondes", flush=True)
 
     t_script_start = sync_time()
     for video_path in video_files:
-        episode = video_path.stem.split("_")[-1]  # ex. "s01e01a"
+        episode_str = video_path.stem.split("_")[-1]  # ex. "s01e01a"
 
         output_path = HDF5_DIR / f"{season}.h5"
-        run_path = f"{episode}/clip"
+        run_path = f"{episode_str}/clip"
         if output_path.exists():
             with h5py.File(output_path, "r") as hf:
                 if run_path in hf and 'preds' in hf[run_path]:
-                    print(f"{episode} déjà traité")
+                    print(f"{episode_str} déjà traité")
                     continue
         try:
             t_vid_start = sync_time()
@@ -92,12 +94,12 @@ if __name__ == '__main__':
             features = hooks.get_features()
 
             t_enregistrement_start = sync_time()
-            writer.sauvegarder(features, preds, str(season), episode, "clip")
+            writer.sauvegarder(features, preds, str(season), episode_str, "clip")
             t_enregistrement = sync_time() - t_enregistrement_start
             print(f"Video enregistré en {t_enregistrement:.2f} secondes", flush=True)
 
             t_vid_total = sync_time() - t_vid_start
-            print(f"{episode} traité en {t_vid_total:.2f} secondes - preds shape: {preds.shape}", flush=True)
+            print(f"{episode_str} traité en {t_vid_total:.2f} secondes - preds shape: {preds.shape}", flush=True)
 
             # Nettoyage de la mémoire pour la vidéo suivante
             del features, preds, segments, events, hooks
@@ -107,6 +109,6 @@ if __name__ == '__main__':
                 torch.cuda.empty_cache()
 
         except Exception as e:
-            print(f"{episode} non traité - Erreur: {e}", flush=True)
+            print(f"{episode_str} non traité - Erreur: {e}", flush=True)
     t_script_total = sync_time() - t_script_start
     print(f"Temps total pour la boucle: {t_script_total:.2f} secondes", flush=True)

@@ -242,60 +242,6 @@ class RidgeRegression:
             X, Y, groupes = X[masque], Y[masque], groupes[masque]
         return X, Y, groupes, TSNR
 
-    def _scaler_X_Y(self, X, Y, train_mask, test_mask):
-        """Standardise X et Y : le scaler est ajusté sur le train uniquement,
-        puis appliqué au train et au test pour éviter toute fuite de données."""
-        X_train, X_test = X[train_mask], X[test_mask]
-        Y_train, Y_test = Y[train_mask], Y[test_mask]
-
-        scaler_X = StandardScaler()
-        X_scaled_train = scaler_X.fit_transform(X_train)
-        X_scaled_test = scaler_X.transform(X_test)
-
-        scaler_Y = StandardScaler()
-        Y_scaled_train = scaler_Y.fit_transform(Y_train)
-        Y_scaled_test = scaler_Y.transform(Y_test)
-        return X_scaled_train, X_scaled_test, Y_scaled_train, Y_scaled_test
-
-    def _ridge_par_lots(self, X_scaled_train, X_scaled_test, Y_scaled_train, Y_scaled_test,alphas, taille_lot, n_folds=None, index_fold=None):
-        """Entraîne une RidgeCV par lots de features (voxels/parcelles) pour
-        limiter l'empreinte mémoire, et retourne le R² et l'alpha optimal par feature.
-        """
-        n_features = Y_scaled_train.shape[1]
-        n_lots = int(np.ceil(n_features / taille_lot))
-
-        r2_lots = np.zeros(n_features, dtype=np.float32)
-        alphas_lots = np.zeros(n_features, dtype=np.float64)
-
-        for index_lot, debut in enumerate(range(0, n_features, taille_lot)):
-
-            fin = min(debut + taille_lot, n_features)
-
-            if alphas.shape[0] == n_features:
-                grille_alphas_lot = np.unique(alphas[debut:fin])
-            else:
-                grille_alphas_lot = alphas
-
-            # Boucle interne avec LOO analytique
-            modele = RidgeCV(
-                alphas=grille_alphas_lot,
-                alpha_per_target=True,
-                cv=None,  # LOO activé
-                fit_intercept=True,
-            )
-
-            modele.fit(X_scaled_train, Y_scaled_train[:, debut:fin])
-
-            # Evaluation sur le fold test
-            Y_pred = modele.predict(X_scaled_test)
-
-            r2_lots[debut:fin] = r2_score(Y_scaled_test[:, debut:fin], Y_pred, multioutput="raw_values")
-            alphas_lots[debut:fin] = modele.alpha_
-            del modele, Y_pred
-            gc.collect()
-
-        return r2_lots, alphas_lots
-
     def nested_cross_validation(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
         """Validation croisée imbriquée 100% manuelle (Méthode de la Moyenne Géométrique)."""
         from sklearn.preprocessing import StandardScaler
