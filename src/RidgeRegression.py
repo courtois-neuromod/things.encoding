@@ -710,7 +710,7 @@ if __name__ == "__main__":
         )
 
         print("\n[TEST] nested_cross_validation")
-        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, tsnr = ridge.nested_cross_validation(alphas, 1, 0.1)
+        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, tsnr = ridge.nested_cross_validation(alphas, 10, 0.1)
 
         # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
         alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
