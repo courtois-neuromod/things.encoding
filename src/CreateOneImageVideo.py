@@ -1,44 +1,84 @@
 import subprocess
 from pathlib import Path
 import pandas as pd
-
-
-def _build_command(onset, video_name, output_image_name):
-    """Construit la commande ffmpeg pour la conversion."""
-    command = [
-        "ffmpeg",
-        "-ss", str(onset),
-        "-i", str(video_name),
-        "-vframes", "1",
-        str(output_image_name)
-    ]
-    return command
+from VideoSegmenteur import VideoSegmenteur
 
 plateforme = ['Rorqual', 'Mac']
-plateforme = plateforme[0]
+plateforme = plateforme[0]  # [0] pour Rorqual, [1] pour Mac
 
 if plateforme == "Rorqual":
     ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
-    PATH_VIDEO = ROOT_ENCODING / "data" / "data" / "sub-01" / "ses-001" / "sub-01_ses-001_task-thingsmemory_run-1.mp4"
-    PATH_TSV = ROOT_ENCODING / "data" / "data" / "sub-01" / "ses-001" / "sub-01_ses-001_task-thingsmemory_run-1_events.tsv"
+    # Sur Rorqual, les TSV sont dans data/data/sub-XX/...
+    DATA_DIR = ROOT_ENCODING / "data" / "data"
+    # Dossier des vidéos CFR sur Rorqual
+    CFR_DIR = ROOT_ENCODING / "data" / "things_mp4_cfr"
 else:
     ROOT_ENCODING = Path(__file__).parent.parent
-    PATH_VIDEO = ROOT_ENCODING / "data" / "sub-01" / "ses-001" / "sub-01_ses-001_task-thingsmemory_run-1.mp4"
-    PATH_TSV = ROOT_ENCODING / "data" / "sub-01" / "ses-001" / "sub-01_ses-001_task-thingsmemory_run-1_events.tsv"
+    # Sur Mac, les TSV sont directement dans data/sub-XX/...
+    DATA_DIR = ROOT_ENCODING / "data"
+    # Dossier des vidéos CFR sur Mac
+    CFR_DIR = ROOT_ENCODING / "data" / "things_mp4_cfr"
 
-
-DATA = PATH_VIDEO
 OUTPUT_DIR = ROOT_ENCODING / "output" / "OneImageVideo"
-
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-df = pd.read_csv(PATH_TSV, sep='\t')
+# Récupère tous les .tsv récursivement dans les sous-dossiers
+tsv_files = sorted(DATA_DIR.rglob("*_events.tsv"))
 
-image = df.iloc[0, 1]
-onset = df.iloc[0, 17]
-offset = df.iloc[0, 18]
-image_name = "image1.png"
-OUTPUT_IMAGE = OUTPUT_DIR / image_name
-command = _build_command(onset, PATH_VIDEO, OUTPUT_IMAGE)
-subprocess.run(command, check=True)
+print(f"{len(tsv_files)} fichiers TSV trouvés au total sur {plateforme}.")
 
+compteur_images = {}
+
+for path_tsv in tsv_files:
+    base_name = path_tsv.name.replace("_events.tsv", "")
+
+    # -- Choix de la vidéo --
+    if plateforme == "Rorqual":
+
+        path_video = CFR_DIR / f"{base_name}_desc-CFR.mp4"
+    else:
+        path_video = CFR_DIR / f"{base_name}_desc-CFR.mp4"
+
+    # Vérification si la vidéo source existe bien
+    if not path_video.exists():
+        print(f"Vidéo introuvable : {path_video.name}, on passe au suivant.")
+        continue
+
+    print(f"\n Traitement de : {base_name}")
+
+    df = pd.read_csv(path_tsv, sep='\t')
+    segmenteur = VideoSegmenteur(path_video, OUTPUT_DIR)
+
+    for idx, row in df.iterrows():
+        onset = row.iloc[17]
+        offset = row.iloc[18]
+        duration = offset - onset - 0.5
+
+        valeur_image = str(row.iloc[1])
+        if pd.isna(valeur_image) or valeur_image == "nan":
+            continue
+
+        nom_stem = Path(valeur_image).stem
+        if '_' in nom_stem:
+            image_name = nom_stem.rsplit('_', 1)[0]
+        else:
+            image_name = nom_stem
+
+        compteur_images[image_name] = compteur_images.get(image_name, 0) + 1
+        occurrence_actuelle = compteur_images[image_name]
+
+        if occurrence_actuelle == 1:
+            nom_fichier_3s = f"{image_name}.mp4"
+            nom_fichier_100s = f"{image_name}_100s.mp4"
+        else:
+            nom_fichier_3s = f"{image_name}__{occurrence_actuelle}.mp4"
+            nom_fichier_100s = f"{image_name}_{occurrence_actuelle}_100s.mp4"
+
+        input_video_path = str(OUTPUT_DIR / nom_fichier_3s)
+        output_video_path = str(OUTPUT_DIR / nom_fichier_100s)
+
+        if Path(output_video_path).exists():
+            continue
+
+        segmenteur.create_segment(onset, duration, input_video_path)
+        segmenteur.etendre_video(100, input_video_path, output_video_path)

@@ -6,7 +6,7 @@ class VideoSegmenteur:
         self.video_path = video_path
         self.stimuli_dir = stimuli_dir
 
-    def create_segment(self, start, duration, segments_idx):
+    def create_segment(self, start, duration, output_video_path):
         """ Pour dupliquer frames, utiliser ces paramètres
             "ffmpeg", "-y",
             "-ss", f"{start:.3f}",
@@ -16,7 +16,8 @@ class VideoSegmenteur:
             "-fps_mode", "cfr",  # force un framerate constant
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
-            str(self.stimuli_dir / f"stimulus_{segments_idx:04d}.mp4"),
+            str(self.stimuli_dir / f"image{segments_idx:04d}.mp4"),
+        """
         """
         subprocess.run([
             "ffmpeg",
@@ -26,8 +27,33 @@ class VideoSegmenteur:
             "-c:v", "libx264",
             "-force_key_frames", "expr:gte(t,0)",
             "-y",
-            str(self.stimuli_dir / f"stimulus_{segments_idx:04d}.mp4"),
-        ], capture_output=True)
+            str(self.stimuli_dir / f"image{segments_idx:04d}.mp4"),
+        ]
+        """
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-ss", f"{start:.3f}",
+            "-t", f"{duration:.3f}",
+            "-i", str(self.video_path),
+            "-vf", "fps=30",  # duplique la frame fixe sur toute la durée
+            "-fps_mode", "cfr",  # force un framerate constant
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            str(output_video_path),
+        ]
+        , capture_output=True)
+
+    def etendre_video(self, duree, video, output_video_path):
+        subprocess.run([
+            "ffmpeg",
+            "-y",
+            "-stream_loop", "-1",
+            "-i", video,
+            "-t", str(duree),
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            str(output_video_path),
+        ])
 
     def cut_run(self, timestamps, n_frames):
         segments_idx = 0
