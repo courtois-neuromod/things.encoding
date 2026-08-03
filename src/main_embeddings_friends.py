@@ -67,7 +67,7 @@ if __name__ == '__main__':
     for video_path in video_files:
         episode_str = video_path.stem.split("_")[-1]  # ex. "s01e01a"
 
-        output_path = HDF5_DIR / f"{season}.h5"
+        output_path = HDF5_DIR / f"season_{season:02d}_{episode_str}.h5"
         run_path = f"{episode_str}/clip"
         if output_path.exists():
             with h5py.File(output_path, "r") as hf:

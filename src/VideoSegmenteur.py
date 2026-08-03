@@ -36,7 +36,7 @@ class VideoSegmenteur:
             "-t", f"{duration:.3f}",
             "-i", str(self.video_path),
             "-vf", "fps=30",  # duplique la frame fixe sur toute la durée
-            "-fps_mode", "cfr",  # force un framerate constant
+            "-vsync", "1",  # force un framerate constant
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
             str(output_video_path),
