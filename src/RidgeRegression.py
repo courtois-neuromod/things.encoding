@@ -243,7 +243,7 @@ class RidgeRegression:
         return X, Y, groupes, TSNR
 
     def nested_cross_validation(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
-        """Validation croisée imbriquée 100% manuelle (Méthode de la Moyenne Géométrique)."""
+        """Validation croisée imbriquée 100% manuelle (sélection d'alpha par moyenne des courbes R² inter-folds internes)."""
         from sklearn.preprocessing import StandardScaler
         from sklearn.model_selection import LeaveOneGroupOut
         from sklearn.linear_model import Ridge
@@ -271,6 +271,7 @@ class RidgeRegression:
 
             n_inner_folds = len(inner_splits)
             best_alphas_inner = np.zeros((n_inner_folds, n_features), dtype=np.float64)
+            r2_par_alpha_cumul = np.zeros((len(grille_alphas), n_features), dtype=np.float64)
 
             # On teste chaque fold interne (une session isolée en validation)
             for j, (inner_train_idx, inner_val_idx) in enumerate(inner_splits):
@@ -297,13 +298,22 @@ class RidgeRegression:
                     # On stocke les performances de cet alpha pour toutes les parcelles
                     r2_par_alpha[a_idx, :] = r2_score(Y_inner_val_scaled, Y_inner_pred, multioutput='raw_values')
 
-                # Pour chaque voxel, on cherche l'index de l'alpha qui a maximisé le R²
-                best_indices = np.argmax(r2_par_alpha, axis=0)
-                best_alphas_inner[j, :] = grille_alphas[best_indices]
+                # Diagnostic uniquement : meilleur alpha de CE fold interne, par voxel
+                # (bruité par construction, sert à visualiser la variabilité inter-sessions,
+                # ne sert plus à calculer l'alpha final)
+                best_indices_fold = np.argmax(r2_par_alpha, axis=0)
+                best_alphas_inner[j, :] = grille_alphas[best_indices_fold]
 
-            # Moyenne géométrique = exp(mean(log(valeurs)))
-            alphas_moyens_geom = np.exp(np.mean(np.log(best_alphas_inner), axis=0))
-            alphas_tous_externes[i, :] = alphas_moyens_geom
+                r2_par_alpha_cumul += r2_par_alpha
+
+            # Sélection finale : on moyenne d'abord les courbes R²(alpha) sur les folds
+            # internes, puis on prend l'argmax par voxel sur cette courbe moyennée.
+            # (moyenner des argmax bruités - via la moyenne géométrique - amplifie les
+            # cas où un seul fold interne bascule au bord de la grille)
+            r2_par_alpha_moyen = r2_par_alpha_cumul / n_inner_folds
+            best_indices = np.argmax(r2_par_alpha_moyen, axis=0)
+            alpha_optimal = grille_alphas[best_indices]
+            alphas_tous_externes[i, :] = alpha_optimal
 
             # Standardisation du set externe
             scaler_X = StandardScaler()
@@ -314,7 +324,7 @@ class RidgeRegression:
             Y_train_scaled = scaler_Y.fit_transform(Y_train)
             Y_test_scaled = scaler_Y.transform(Y_test)
 
-            ridge_final = Ridge(alpha=alphas_moyens_geom)
+            ridge_final = Ridge(alpha=alpha_optimal)
             ridge_final.fit(X_train_scaled, Y_train_scaled)
 
             # Évaluation sur le test set
