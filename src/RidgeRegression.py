@@ -687,9 +687,9 @@ if __name__ == "__main__":
 
     flag_delai_bold_brute = True
     centrage_donne_temps  = False
-    flag_precision_voxel  = True
+    flag_precision_voxel  = False
     randomize_flag        = False
-    ROImask_flag          = True
+    ROImask_flag          = False
 
     liste_ROI = ["faceFFA", "scenePPA", "bodyEBA", "V1", "V2", "V3",
                  "hv4", "dorsalAttention", "ventralAttention", "visual"]

@@ -66,9 +66,10 @@ if __name__ == '__main__':
     t_script_start = sync_time()
     for video_path in video_files:
         episode_str = video_path.stem.split("_")[-1]  # ex. "s01e01a"
-
-        output_path = HDF5_DIR / f"season_{season:02d}_{episode_str}.h5"
-        run_path = f"{episode_str}/clip"
+        nom_saison = f"s{int(season):02d}"
+        nom_fichier = f"friends_{nom_saison}{episode_str}"
+        output_path = HDF5_DIR / f"{nom_fichier}.h5"
+        run_path = f"{episode_str}"
         if output_path.exists():
             with h5py.File(output_path, "r") as hf:
                 if run_path in hf and 'preds' in hf[run_path]:
@@ -94,7 +95,7 @@ if __name__ == '__main__':
             features = hooks.get_features()
 
             t_enregistrement_start = sync_time()
-            writer.sauvegarder(features, preds, str(season), episode_str, "clip")
+            writer.sauvegarder(features, preds, nom_fichier, episode_str)
             t_enregistrement = sync_time() - t_enregistrement_start
             print(f"Video enregistré en {t_enregistrement:.2f} secondes", flush=True)
 
