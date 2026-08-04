@@ -30,7 +30,7 @@ class HDF5Writer:
         preds: np.ndarray,
         subject: str,
         session: str,
-        run: str,
+        run=None,
     ) -> None:
         """Écrit les features et preds dans le fichier HDF5 du sujet en mode append.
 
@@ -42,9 +42,10 @@ class HDF5Writer:
             run: nom du run, ex. "sub-01_ses-001_task-thingsmemory_run-1"
         """
         output_path = self.output_dir / f"{subject}.h5"
+        group_path = f"{session}/{run}" if run is not None else session
 
         with h5py.File(output_path, 'a') as hf:
-            group = hf.require_group(f"{session}/{run}")
+            group = hf.require_group(group_path)
 
             # Sauvegarde des prédictions BOLD
             if 'preds' in group:
@@ -56,5 +57,7 @@ class HDF5Writer:
                 if safe_name in group:
                     del group[safe_name]
                 group.create_dataset(safe_name, data=array)
-
-        print(f"Sauvegardé : {session}/{run} → {output_path}")
+        if run is None:
+            print(f"Sauvegardé : {session} → {output_path}")
+        else:
+            print(f"Sauvegardé : {session}/{run} → {output_path}")

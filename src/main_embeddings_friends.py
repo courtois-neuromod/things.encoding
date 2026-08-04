@@ -25,9 +25,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Extraction des latents TRIBE v2')
     parser.add_argument('--season', type=int, required=True, help='Identifiant de la saison à traiter')
     parser.add_argument('--episode', type=int, required=True, help="Identifiant de l'episode à traiter")
+    parser.add_argument('--partieEpisode', type=str, required=True, help='Identifiant de la parrtie d\'episode')
     args = parser.parse_args()
     season = args.season
     episode = args.episode
+    partie = args.partieEpisode
 
     #warnings.filterwarnings("ignore")
     #logging.disable(logging.CRITICAL)
@@ -59,57 +61,57 @@ if __name__ == '__main__':
 
     t1 = sync_time()
     writer = HDF5Writer(HDF5_DIR)
-    video_files = sorted(DATA_DIR.glob(f"friends_s{season:02d}e{episode:02d}[abc].mkv"))
+    video_files = sorted(DATA_DIR.glob(f"friends_s{season:02d}e{episode:02d}{partie}.mkv"))
     t_recherche_video = sync_time() - t1
-    print(f"Saison {season} --> {len(video_files)} vidéos trouvées en {t_recherche_video:.2f} secondes", flush=True)
+    print(f"Saison {season} --> {len(video_files)} vidéo trouvées en {t_recherche_video:.2f} secondes", flush=True)
 
     t_script_start = sync_time()
-    for video_path in video_files:
-        episode_str = video_path.stem.split("_")[-1]  # ex. "s01e01a"
-        nom_saison = f"s{int(season):02d}"
-        nom_fichier = f"friends_{nom_saison}{episode_str}"
-        output_path = HDF5_DIR / f"{nom_fichier}.h5"
-        run_path = f"{episode_str}"
-        if output_path.exists():
-            with h5py.File(output_path, "r") as hf:
-                if run_path in hf and 'preds' in hf[run_path]:
-                    print(f"{episode_str} déjà traité")
-                    continue
-        try:
-            t_vid_start = sync_time()
-            events = model.get_events_dataframe(video_path=str(video_path))
+    episode_str = f"s{season:02d}e{episode:02d}{partie}"  # ex. "s01e01a"
+    video_path = DATA_DIR / f"friends_{episode_str}.mkv"
+    nom_fichier = f"friends_{episode_str}"
+    output_path = HDF5_DIR / f"{nom_fichier}.h5"
+    run_path = f"{episode_str}"
+    if output_path.exists():
+        with h5py.File(output_path, "r") as hf:
+            if run_path in hf and 'preds' in hf[run_path]:
+                print(f"{episode_str} déjà traité")
+                exit(0)
+    try:
+        t_vid_start = sync_time()
+        events = model.get_events_dataframe(video_path=str(video_path))
 
-            t_hook_start = sync_time()
-            hooks = TransformerHooks(fmri_enc)
-            hooks.attacher()
-            t_hook = sync_time() - t_hook_start
-            print(f"Hook chargé en {t_hook:.2f} secondes", flush=True)
+        t_hook_start = sync_time()
+        hooks = TransformerHooks(fmri_enc)
+        hooks.attacher()
+        t_hook = sync_time() - t_hook_start
+        print(f"Hook chargé en {t_hook:.2f} secondes", flush=True)
 
-            t_infer_start = sync_time()
-            with torch.no_grad():
-                preds, segments = model.predict(events)
-            t_infer = sync_time() - t_infer_start
-            print(f"Inférence réalisé en {t_infer:.2f} secondes", flush=True)
+        t_infer_start = sync_time()
+        with torch.no_grad():
+            preds, segments = model.predict(events)
+        t_infer = sync_time() - t_infer_start
+        print(f"Inférence réalisé en {t_infer:.2f} secondes", flush=True)
 
-            hooks.retirer()
-            features = hooks.get_features()
+        hooks.retirer()
+        features = hooks.get_features()
 
-            t_enregistrement_start = sync_time()
-            writer.sauvegarder(features, preds, nom_fichier, episode_str)
-            t_enregistrement = sync_time() - t_enregistrement_start
-            print(f"Video enregistré en {t_enregistrement:.2f} secondes", flush=True)
+        t_enregistrement_start = sync_time()
+        writer.sauvegarder(features, preds, nom_fichier, episode_str)
+        t_enregistrement = sync_time() - t_enregistrement_start
+        print(f"Video enregistré en {t_enregistrement:.2f} secondes", flush=True)
 
-            t_vid_total = sync_time() - t_vid_start
-            print(f"{episode_str} traité en {t_vid_total:.2f} secondes - preds shape: {preds.shape}", flush=True)
+        t_vid_total = sync_time() - t_vid_start
+        print(f"{episode_str} traité en {t_vid_total:.2f} secondes - preds shape: {preds.shape}", flush=True)
 
-            # Nettoyage de la mémoire pour la vidéo suivante
-            del features, preds, segments, events, hooks
+        # Nettoyage de la mémoire pour la vidéo suivante
+        del features, preds, segments, events, hooks
 
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        except Exception as e:
-            print(f"{episode_str} non traité - Erreur: {e}", flush=True)
+    except Exception as e:
+        print(f"{episode_str} non traité - Erreur: {e}", flush=True)
+
     t_script_total = sync_time() - t_script_start
     print(f"Temps total pour la boucle: {t_script_total:.2f} secondes", flush=True)
