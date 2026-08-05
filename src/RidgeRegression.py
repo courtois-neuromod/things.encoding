@@ -36,6 +36,25 @@ DPI_FIGURES = 300
 T_TRIBE_S = 0.5
 TR_IRMF_S = 1.49
 SEUIL_AFFICHAGE_BRAIN_MAP = 0.01
+SEUIL_DETECTION_Y_STANDARDISE = 0.05
+
+# Protocole "one cycle" (découpage par blocs de sessions)
+NB_SESSIONS_TOTAL = 36
+SESSIONS_TEST_ONE_CYCLE = (14, 15, 16)
+BUFFER_TEST_ONE_CYCLE = (13, 17)
+
+# Blocs de Validation et leurs buffers, donnés explicitement par le protocole
+# (bornes et ordre exacts — pas dérivés d'une règle de tuilage générique).
+FOLDS_VALIDATION_ONE_CYCLE = (
+    {"validation": (1, 2, 3), "buffer": (4,)},
+    {"validation": (5, 6, 7), "buffer": (4, 8)},
+    {"validation": (10, 11, 12), "buffer": (9, 13)},
+    {"validation": (18, 19, 20), "buffer": (17, 21)},
+    {"validation": (22, 23, 24), "buffer": (21, 25)},
+    {"validation": (26, 27, 28), "buffer": (25, 29)},
+    {"validation": (30, 31, 32), "buffer": (29, 33)},
+    {"validation": (34, 35, 36), "buffer": (33,)},
+)
 
 @dataclass
 class CheminsProjet:
@@ -212,6 +231,14 @@ class RidgeRegression:
             Y = np.concatenate(Y_list, axis=0)
 
             TSNR = Y.mean(axis=0) / (Y.std(axis=0) + 1e-8)
+            if abs(float(np.mean(Y))) < SEUIL_DETECTION_Y_STANDARDISE and abs(float(np.std(Y)) - 1) < SEUIL_DETECTION_Y_STANDARDISE:
+                print(
+                    "ATTENTION : Y semble déjà standardisé en amont (moyenne globale "
+                    f"={np.mean(Y):.2e}, écart-type={np.std(Y):.3f}). Le TSNR calculé ici "
+                    "(mean/std sur un signal déjà z-scoré) est proche de 0 par construction "
+                    "et ne reflète PAS la qualité du signal brut. Il faut le calculer sur le "
+                    "BOLD non standardisé (avant l'extraction des séries temporelles), pas ici."
+                )
 
             groupes = np.concatenate(groupes_list, axis=0)
             print(f"Matrice finale : X={X.shape}, Y={Y.shape}")
@@ -414,6 +441,130 @@ class RidgeRegression:
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
+    def _generer_folds_one_cycle(self):
+        """Construit les folds Train/Validation/Test/Buffer du protocole 'one cycle'.
+
+        Règles (sessions numérotées 1..36) :
+        - Test FIXE, identique pour tous les folds : {14, 15, 16}.
+        - Buffer autour du Test, toujours exclu (jamais Train ni Validation) : {13, 17}.
+        - Validation et buffer associé : donnés explicitement par `FOLDS_VALIDATION_ONE_CYCLE`
+          (8 blocs, bornes et buffers exacts du protocole — pas dérivés d'une règle
+          générique de tuilage).
+        - Train : tout le reste (ni Test, ni buffer Test, ni Validation, ni buffer
+          Validation, pour ce fold).
+        """
+        sessions_test = set(SESSIONS_TEST_ONE_CYCLE)
+        buffer_test = set(BUFFER_TEST_ONE_CYCLE)
+        toutes_sessions = set(range(1, NB_SESSIONS_TOTAL + 1))
+
+        folds = []
+        for spec in FOLDS_VALIDATION_ONE_CYCLE:
+            validation = list(spec["validation"])
+            buffer_validation = set(spec["buffer"])
+            exclues = sessions_test | buffer_test | set(validation) | buffer_validation
+            train = sorted(toutes_sessions - exclues)
+            folds.append({
+                "train": train,
+                "validation": validation,
+                "test": sorted(sessions_test),
+                "buffer": sorted(buffer_test | buffer_validation),
+            })
+        return folds
+
+    def nested_cross_validation_one_cycle(self, grille_alphas):
+        """Validation croisée par blocs de sessions ('one cycle'), protocole type
+        CNeuroMod-THINGS.
+
+        Contrairement aux deux autres jumeaux (`nested_cross_validation_full_manuel`,
+        `nested_cross_validation_ridgecv_loo`), le split n'est pas aléatoire : le
+        Test est FIXE (sessions 14-16) et identique pour tous les folds, jamais
+        utilisé pour choisir l'alpha. Chaque fold ne comporte qu'UN SEUL split
+        Train → Validation (pas de sous-CV interne) pour sélectionner l'alpha optimal
+        par voxel ; le modèle final est ensuite réentraîné sur Train+Validation et
+        évalué une fois sur le Test fixe. Des sessions tampons ("buffer") isolent le
+        Test et chaque bloc de Validation de leurs voisines immédiates pour limiter
+        la fuite due à l'autocorrélation temporelle inter-sessions.
+
+        Voir `_generer_folds_one_cycle` pour le détail du découpage.
+        """
+        X, Y, groupes, TSNR = self._selection_X_Y()
+        n_features = Y.shape[1]
+
+        folds = self._generer_folds_one_cycle()
+        n_folds = len(folds)
+
+        print(f"  -> {n_folds} folds 'one cycle' générés :")
+        for i, fold in enumerate(folds):
+            print(f"     Fold {i + 1} | Validation={fold['validation']} | Buffer={fold['buffer']} | Train={len(fold['train'])} sessions")
+
+        r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
+        alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
+
+        for i, fold in enumerate(folds):
+            print(f"  -> Début du Fold {i + 1}/{n_folds} (Validation={fold['validation']})...")
+
+            masque_train = np.isin(groupes, fold["train"])
+            masque_val = np.isin(groupes, fold["validation"])
+            masque_test = np.isin(groupes, fold["test"])
+
+            if not masque_val.any() or not masque_test.any():
+                print(f"     Fold {i + 1} ignoré : Validation ou Test vide pour {self.subject} (sessions manquantes dans les données).")
+                continue
+
+            X_train, Y_train = X[masque_train], Y[masque_train]
+            X_val, Y_val = X[masque_val], Y[masque_val]
+            X_test, Y_test = X[masque_test], Y[masque_test]
+
+            # Sélection de l'alpha optimal par voxel sur l'unique split Train -> Validation
+            # (0 fuite : standardisation fit sur Train seul)
+            scaler_X_selection = StandardScaler()
+            X_train_scaled_selection = scaler_X_selection.fit_transform(X_train)
+            X_val_scaled = scaler_X_selection.transform(X_val)
+
+            scaler_Y_selection = StandardScaler()
+            Y_train_scaled_selection = scaler_Y_selection.fit_transform(Y_train)
+            Y_val_scaled = scaler_Y_selection.transform(Y_val)
+
+            r2_par_alpha = np.zeros((len(grille_alphas), n_features))
+            for a_idx, alpha in enumerate(grille_alphas):
+                ridge_selection = Ridge(alpha=alpha)
+                ridge_selection.fit(X_train_scaled_selection, Y_train_scaled_selection)
+                Y_val_pred = ridge_selection.predict(X_val_scaled)
+                r2_par_alpha[a_idx, :] = r2_score(Y_val_scaled, Y_val_pred, multioutput='raw_values')
+
+            alpha_optimal = grille_alphas[np.argmax(r2_par_alpha, axis=0)]
+            alphas_tous_externes[i, :] = alpha_optimal
+
+            # Réentraînement final sur Train + Validation, évaluation sur le Test fixe
+            X_train_val = np.concatenate([X_train, X_val], axis=0)
+            Y_train_val = np.concatenate([Y_train, Y_val], axis=0)
+
+            scaler_X = StandardScaler()
+            X_train_val_scaled = scaler_X.fit_transform(X_train_val)
+            X_test_scaled = scaler_X.transform(X_test)
+
+            scaler_Y = StandardScaler()
+            Y_train_val_scaled = scaler_Y.fit_transform(Y_train_val)
+            Y_test_scaled = scaler_Y.transform(Y_test)
+
+            ridge_final = Ridge(alpha=alpha_optimal)
+            ridge_final.fit(X_train_val_scaled, Y_train_val_scaled)
+            Y_pred_scaled = ridge_final.predict(X_test_scaled)
+
+            r2_score_fold = r2_score(Y_test_scaled, Y_pred_scaled, multioutput='raw_values')
+            r2_tous_les_tests[i, :] = r2_score_fold
+            print(f"-> R2 mean : {np.mean(r2_score_fold)}")
+            print(f"-> R2 max : {np.max(r2_score_fold)}")
+
+            del ridge_final, Y_pred_scaled
+            gc.collect()
+
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)
+        r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
+        alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
+
+        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
+
     def _sauvegarder_figure(self, figure_sauvegardable, nom_fichier, message, **kwargs_savefig):
         """Sauvegarde une figure (matplotlib Figure ou display Nilearn) dans output/ et affiche un message."""
         chemins = self.get_path_file_by_plateform(self.plateforme)
@@ -441,13 +592,6 @@ class RidgeRegression:
         mediane = np.median(r2_moyen)
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
 
-        # DataFrame long format : une ligne par (fold, voxel)
-        rows = []
-        for i in range(r2_tous_les_tests.shape[0]):
-            for j in range(r2_tous_les_tests.shape[1]):
-                rows.append({"fold": i, "r2": r2_tous_les_tests[i, j]})
-        df_folds = pd.DataFrame(rows)
-
         # DataFrame pour la moyenne inter-folds
         df_moyen = pd.DataFrame({"r2": r2_moyen})
 
@@ -471,8 +615,9 @@ class RidgeRegression:
         plt.tight_layout()
 
         nom_fichier = f"r2_distribution_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        self._sauvegarder_figure(fig, nom_fichier, "Distribution R² sauvegardée")
+        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Distribution R² sauvegardée")
         plt.close(fig)
+        return chemin_sauvegarde
 
     def plot_ROImask_histogram(self, scores_finaux):
         """Trace un boxplot des R² par ROI (voxelwise uniquement) et l'enregistre en HTML."""
@@ -511,7 +656,6 @@ class RidgeRegression:
                         })
 
                 df = pd.DataFrame(rows).sort_values("r2_mean", ascending=True)
-                print(df.shape)
 
                 fig, ax = plt.subplots(figsize=(8, 10))
                 sns.barplot(
@@ -526,10 +670,12 @@ class RidgeRegression:
                 plt.tight_layout()
 
                 nom_fichier = f"ROImask_{self.subject}_{self.layer}.png"
-                self._sauvegarder_figure(fig, nom_fichier, "ROImask sauvegardé", bbox_inches="tight")
+                chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "ROImask sauvegardé", bbox_inches="tight")
                 plt.close(fig)
+                return chemin_sauvegarde
         else:
-            return "Pas en voxel"
+            print("ROImask ignoré : analyse disponible uniquement en précision voxel (flag_precision_voxel=True).")
+            return None
 
     def plot_r2_threshold(self, r2_tous_les_tests, suffix=""):
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels,)
@@ -569,26 +715,32 @@ class RidgeRegression:
         plt.tight_layout()
 
         nom_fichier = f"r2_threshold_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        self._sauvegarder_figure(fig, nom_fichier, "Threshold R² sauvegardé")
+        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Threshold R² sauvegardé")
         plt.close(fig)
+        return chemin_sauvegarde
 
-    def plot_accuracy(self, r2_tous_les_tests):
-        r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels ou n_parcelles,)
-        n_features = r2_moyen.shape[0]
+    def plot_accuracy(self, r2_tous_les_tests, suffix=""):
+        """Barres mean/median/top-10% pour UN sujet (pas d'agrégation multi-sujets :
+        un seul appel = un seul sujet, une seule figure)."""
+        n_features = r2_tous_les_tests.shape[1]
+        n_folds = r2_tous_les_tests.shape[0]
 
-        mean = np.mean(r2_moyen)
-        median = np.median(r2_moyen)
-        seuil_top10 = np.percentile(r2_moyen, 90)
-        top10 = np.mean(r2_moyen[r2_moyen >= seuil_top10])
+        # Une valeur par fold externe pour que seaborn puisse tracer une barre d'erreur (écart-type inter-folds) :
+        # la variabilité entre folds externes est précisément ce que la nested CV permet
+        # d'estimer.
+        means_par_fold = np.mean(r2_tous_les_tests, axis=1)
+        medians_par_fold = np.median(r2_tous_les_tests, axis=1)
+        seuils_top10_par_fold = np.percentile(r2_tous_les_tests, 90, axis=1)
+        top10_par_fold = np.array([
+            np.mean(fold[fold >= seuil])
+            for fold, seuil in zip(r2_tous_les_tests, seuils_top10_par_fold)
+        ])
 
-        # Création du label pour l'axe X (Sujet + N)
-        x_label = f"{self.subject}\n(n={n_features:,})"
-
-        # Restructuration du DataFrame pour utiliser le paramètre 'hue' de Seaborn
+        # Format long (une ligne par fold externe × métrique) : errorbar="sd" dans
+        # sns.barplot calcule alors automatiquement moyenne + écart-type inter-folds.
         df = pd.DataFrame({
-            "Sujet": [x_label, x_label, x_label],
-            "Métrique": ["mean", "median", "top-10% mean"],
-            "R2": [mean, median, top10],
+            "Métrique": ["mean"] * n_folds + ["median"] * n_folds + ["top-10% mean"] * n_folds,
+            "R2": np.concatenate([means_par_fold, medians_par_fold, top10_par_fold]),
         })
 
         fig, ax = plt.subplots(figsize=(6, 6))
@@ -600,10 +752,9 @@ class RidgeRegression:
         # Couleurs fidèles à votre image de référence
         palette = {"mean": "#0072B2", "median": "#56B4E9", "top-10% mean": "#E69F00"}
 
-        # Le 'hue' crée la légende automatiquement et groupe les barres
         sns.barplot(
-            data=df, x="Sujet", y="R2", hue="Métrique",
-            palette=palette, ax=ax
+            data=df, x="Métrique", y="R2", hue="Métrique",
+            palette=palette, ax=ax, errorbar="sd", capsize=0.1, legend=False,
         )
 
         # Annotation automatique et propre des valeurs sur les barres
@@ -614,20 +765,18 @@ class RidgeRegression:
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
 
-        ax.set_xlabel("")  # On laisse vide car le label du tick suffit
+        ax.set_xlabel("")
         ax.set_ylabel("R² (raw)", fontsize=12)
 
         # Titre centré et en gras
-        ax.set_title(f"Per-subject accuracy — {self.subject} / {self.layer}", fontsize=14, fontweight='bold')
-
-        # Positionnement de la légende (sans cadre, en haut à gauche)
-        ax.legend(title="", frameon=False, loc="upper left")
+        ax.set_title(f"Accuracy — {self.subject} / {self.layer} (n={n_features:,}, {n_folds} folds)", fontsize=14, fontweight='bold')
 
         plt.tight_layout()
 
-        nom_fichier = f"accuracy_{self.subject}_{self.layer}.png"
-        self._sauvegarder_figure(fig, nom_fichier, "Accuracy sauvegardée")
+        nom_fichier = f"accuracy_{self.subject}_{self.layer}{suffix}.png"
+        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Accuracy sauvegardée")
         plt.close(fig)
+        return chemin_sauvegarde
 
 
     def plot_alphas_histogram(self, alphas_fold, grille_alphas, alphas_finaux=None, suffix=""):
@@ -673,8 +822,9 @@ class RidgeRegression:
         ax.set_title(titre)
         plt.tight_layout()
         nom_fichier = f"histogram_alphas_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        self._sauvegarder_figure(fig, nom_fichier, "Histogramme alphas sauvegardé")
+        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Histogramme alphas sauvegardé")
         plt.close(fig)
+        return chemin_sauvegarde
 
     def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin = None, vmax = None, suffix=""):
         """Projette un vecteur de scores (R², alphas, TSNR...) sur le cerveau et enregistre la carte statistique en PNG."""
@@ -717,27 +867,195 @@ class RidgeRegression:
             display._cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda valeur, position: f"$10^{{{valeur:.0f}}}$"))
 
         nom_fichier = f"brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}{suffix}.png"
-        self._sauvegarder_figure(display, nom_fichier, "Carte cérébrale sauvegardée")
+        chemin_sauvegarde = self._sauvegarder_figure(display, nom_fichier, "Carte cérébrale sauvegardée")
         display.close()
         plt.close(fig)
+        return chemin_sauvegarde
 
     def brain_mapping_r2(self, scores_r2, noms_parcelles=None, suffix=""):
         """Affiche le résumé des R² et enregistre la carte cérébrale correspondante."""
         self.print_scores(scores_r2, noms_parcelles)
-        self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin=0, vmax=np.max(scores_r2), suffix=suffix)
+        chemin_sauvegarde = self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin=0, vmax=np.max(scores_r2), suffix=suffix)
+        return chemin_sauvegarde
 
     def brain_mapping_alphas(self, alphas_tous_les_lots, suffix=""):
         """Enregistre la carte cérébrale des alphas optimaux (échelle log10)."""
-        self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=True, suffix=suffix)
+        # treshold=0 : la donnée affichée est log10(alpha),
+        chemin_sauvegarde = self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0, echelle_log=True, suffix=suffix)
+        return chemin_sauvegarde
 
     def brain_mapping_tsnr(self, tsnr, suffix=""):
         """Enregistre la carte cérébrale correspondante."""
         # évite que les valeurs extrêmes écrasent la colorbar
-        self._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues", treshold=0.0, echelle_log=False,vmin=0,vmax=np.percentile(tsnr, 95),suffix=suffix,)
+        chemin_sauvegarde = self._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues", treshold=0.0, echelle_log=False,vmin=0,vmax=np.percentile(tsnr, 95),suffix=suffix,)
+        return chemin_sauvegarde
+
+    def regrouper_figures_dans_une_planche(self, nom_methode, liste_chemins_figures, nombre_de_colonnes=3):
+        """Assemble toutes les figures PNG déjà sauvegardées pour UNE méthode de
+        validation croisée dans une seule image PNG (une "planche"), au lieu d'avoir
+        un fichier séparé par figure.
+
+        `liste_chemins_figures` est la liste des chemins renvoyés par les appels à
+        brain_mapping_r2, brain_mapping_alphas, plot_accuracy, etc. Certains appels
+        peuvent renvoyer None (par exemple ROImask quand flag_precision_voxel est
+        False) : ces entrées sont ignorées ici.
+        """
+        # Étape 1 : on ne garde que les chemins réellement produits (pas les None).
+        chemins_valides = []
+        for chemin_figure in liste_chemins_figures:
+            if chemin_figure is not None:
+                chemins_valides.append(chemin_figure)
+
+        nombre_de_figures = len(chemins_valides)
+        if nombre_de_figures == 0:
+            print(f"Aucune figure à regrouper pour {nom_methode}.")
+            return None
+
+        # Étape 2 : on calcule le nombre de lignes nécessaires pour ranger toutes
+        # les figures dans une grille de `nombre_de_colonnes` colonnes.
+        nombre_de_lignes = nombre_de_figures // nombre_de_colonnes
+        reste_figures = nombre_de_figures % nombre_de_colonnes
+        if reste_figures != 0:
+            nombre_de_lignes = nombre_de_lignes + 1
+
+        # Étape 3 : on crée la grande figure qui contiendra une grille de sous-figures.
+        largeur_par_case = 6
+        hauteur_par_case = 6
+        largeur_totale = largeur_par_case * nombre_de_colonnes
+        hauteur_totale = hauteur_par_case * nombre_de_lignes
+        figure_planche, grille_axes = plt.subplots(
+            nombre_de_lignes, nombre_de_colonnes,
+            figsize=(largeur_totale, hauteur_totale),
+        )
+
+        # Étape 4 : on parcourt chaque case de la grille, ligne par ligne puis
+        # colonne par colonne, et on y affiche l'image correspondante si elle existe.
+        index_figure_courante = 0
+        for numero_ligne in range(nombre_de_lignes):
+            for numero_colonne in range(nombre_de_colonnes):
+
+                # Récupération de l'axe (la "case") correspondant à cette position,
+                # en tenant compte du fait que matplotlib simplifie la forme du
+                # tableau d'axes quand il n'y a qu'une seule ligne ou une seule colonne.
+                if nombre_de_lignes == 1 and nombre_de_colonnes == 1:
+                    axe_courant = grille_axes
+                elif nombre_de_lignes == 1:
+                    axe_courant = grille_axes[numero_colonne]
+                elif nombre_de_colonnes == 1:
+                    axe_courant = grille_axes[numero_ligne]
+                else:
+                    axe_courant = grille_axes[numero_ligne, numero_colonne]
+
+                if index_figure_courante < nombre_de_figures:
+                    chemin_image = chemins_valides[index_figure_courante]
+                    image_chargee = plt.imread(chemin_image)
+                    axe_courant.imshow(image_chargee)
+                    nom_court = Path(chemin_image).stem
+                    axe_courant.set_title(nom_court, fontsize=8)
+
+                # On masque toujours les axes (case vide ou pas) pour un rendu propre.
+                axe_courant.axis("off")
+
+                index_figure_courante = index_figure_courante + 1
+
+        titre_planche = f"{nom_methode} — {self.subject} / {self.layer}"
+        figure_planche.suptitle(titre_planche, fontsize=16, fontweight="bold")
+        plt.tight_layout()
+
+        nom_fichier_planche = f"planche_{nom_methode}_{self.subject}_{self.layer}.png"
+        chemin_sauvegarde = self._sauvegarder_figure(figure_planche, nom_fichier_planche, "Planche de figures sauvegardée")
+        plt.close(figure_planche)
+
+        return chemin_sauvegarde
+
+    def generer_toutes_les_figures(self, nom_methode, resultats, grille_alphas, noms_parcelles=None):
+        """Génère et sauvegarde l'ensemble des figures standard pour UNE méthode de
+        validation croisée (appelée une fois par méthode : full_manuel, ridgecv_loo,
+        one_cycle...). `resultats` est le tuple renvoyé par la méthode
+        `nested_cross_validation_*` correspondante :
+        - 7 éléments pour `nested_cross_validation_full_manuel` (avec `best_alphas_inner`,
+          le diagnostic de sous-CV interne — LOGO — que les deux autres n'ont pas) ;
+        - 6 éléments pour `nested_cross_validation_ridgecv_loo` et
+          `nested_cross_validation_one_cycle` (pas de sous-CV interne).
+
+        Retourne un petit résumé (dict) réutilisable pour comparer les méthodes entre
+        elles dans le `__main__`.
+        """
+        if len(resultats) == 7:
+            r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, _, best_alphas_inner, tsnr = resultats
+        else:
+            r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, _, tsnr = resultats
+            best_alphas_inner = None
+
+        suffix = f"_{nom_methode}"
+        # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
+        alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
+
+        print(f"\n[FIGURES] {nom_methode} — Variance inter-folds moyenne : {np.mean(r2_variance_inter_folds):.6f}")
+
+        # Liste explicite des chemins de chaque figure produite pour cette méthode :
+        # elle sert ensuite à assembler toutes ces figures dans une seule planche.
+        liste_chemins_figures = []
+
+        # 1. brain_r2_map + 2. alpha_map (+ TSNR, cohérent avec les deux autres cartes)
+        print(" -> Cartes cérébrales (R², Alphas, TSNR)...")
+        chemin_figure = self.brain_mapping_r2(r2_moyen, noms_parcelles, suffix=suffix)
+        liste_chemins_figures.append(chemin_figure)
+
+        chemin_figure = self.brain_mapping_alphas(alphas_moyens, suffix=suffix)
+        liste_chemins_figures.append(chemin_figure)
+
+        #chemin_figure = self.brain_mapping_tsnr(tsnr, suffix=suffix)
+        #liste_chemins_figures.append(chemin_figure)
+
+        # 3. histogrammes des alphas par fold + 4. moyenne des alphas
+        print(" -> Histogrammes des alphas...")
+        chemin_figure = self.plot_alphas_histogram(alphas_fold=alphas_tous_externes, grille_alphas=grille_alphas, suffix=f"{suffix}_folds")
+        liste_chemins_figures.append(chemin_figure)
+
+        chemin_figure = self.plot_alphas_histogram(alphas_fold=None, grille_alphas=grille_alphas, alphas_finaux=alphas_moyens, suffix=f"{suffix}_moyen")
+        liste_chemins_figures.append(chemin_figure)
+
+        # 5. visualisation des alphas internes (uniquement si la méthode en produit)
+        if best_alphas_inner is not None:
+            chemin_figure = self.plot_alphas_histogram(alphas_fold=best_alphas_inner, grille_alphas=grille_alphas, suffix=f"{suffix}_inner")
+            liste_chemins_figures.append(chemin_figure)
+        else:
+            print(f"  -> Pas d'alphas internes pour {nom_methode} (pas de sous-CV interne).")
+
+        # 6. courbe d'accuracy (single-subject), distributionr2 et r2 treshold
+        print(" -> Accuracy et distribution R²...")
+        chemin_figure = self.plot_accuracy(r2_tous_les_tests, suffix=suffix)
+        liste_chemins_figures.append(chemin_figure)
+
+        chemin_figure = self.plot_r2_distribution(r2_tous_les_tests, suffix=suffix)
+        liste_chemins_figures.append(chemin_figure)
+
+        chemin_figure = self.plot_r2_threshold(r2_tous_les_tests, suffix=suffix)
+        liste_chemins_figures.append(chemin_figure)
+
+        # ROIMask (uniquement en précision voxel)
+        if self.flag_precision_voxel:
+            print(" -> ROIMask...")
+            chemin_figure = self.plot_ROImask_histogram(r2_moyen)
+            liste_chemins_figures.append(chemin_figure)
+        else:
+            print(f"  -> ROIMask ignoré pour {nom_methode} (nécessite flag_precision_voxel=True).")
+
+        # Regroupement de toutes les figures ci-dessus dans un seul fichier PNG.
+        print(" -> Assemblage de la planche de figures...")
+        self.regrouper_figures_dans_une_planche(nom_methode, liste_chemins_figures)
+
+        return {
+            "r2_moyen": r2_moyen,
+            "r2_tous_les_tests": r2_tous_les_tests,
+            "alphas_moyens": alphas_moyens,
+        }
 
 if __name__ == "__main__":
-    # Point d'entrée : lance la validation croisée imbriquée pour chaque sujet
-    # et exporte les cartes cérébrales (R², alphas, TSNR) ainsi que les histogrammes.
+    # Point d'entrée : lance les 3 méthodes de validation croisée pour chaque sujet,
+    # génère toutes les figures associées, compare les méthodes entre elles, et lance
+    # la baseline randomisée avec la méthode manuelle.
 
     # --- PARAMÈTRES ---
     plateforme = ["Rorqual", "Mac"]
@@ -750,73 +1068,47 @@ if __name__ == "__main__":
     flag_delai_bold_brute = True
     centrage_donne_temps  = False
     flag_precision_voxel  = False
-    randomize_flag        = False
     ROImask_flag          = False
-
-    liste_ROI = ["faceFFA", "scenePPA", "bodyEBA", "V1", "V2", "V3",
-                 "hv4", "dorsalAttention", "ventralAttention", "visual"]
-
-    alphas_par_sujet_voxel = {
-        "sub-01": np.logspace(2, 9, 20),
-        "sub-02": np.logspace(1, 8, 20),
-        "sub-03": np.logspace(0, 7, 20),
-        "sub-06": np.logspace(2, 9, 20),
-    }
-    alphas_par_sujet_parcelle = {
-        "sub-01": np.logspace(2, 7, 20),
-        "sub-02": np.logspace(1, 6, 20),
-        "sub-03": np.logspace(1, 4, 20),
-        "sub-06": np.logspace(2, 5, 20),
-    }
 
     for SUB in liste_sujets:
         print(f"\n{'='*60}\n  Sujet : {SUB}\n{'='*60}")
 
-        #alphas = alphas_par_sujet_voxel[SUB] if flag_precision_voxel else alphas_par_sujet_parcelle[SUB]
         alphas = np.logspace(-1, 10, 20)
-        # ── Alignement normal ────────────────────────────────────────────────
+
         ridge = RidgeRegression(
             plateforme, SUB, LAYER,
             flag_delai_bold_brute, centrage_donne_temps,
             flag_precision_voxel, ROImask_flag, randomize_flag=False
         )
 
-        print("\n[TEST] nested_cross_validation_full_manuel")
-        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, tsnr = ridge.nested_cross_validation_full_manuel(alphas, 10, 0.1)
+        # ── Les 3 méthodes de validation croisée ───────────────────────────
+        methodes = {
+            "full_manuel": lambda: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1),
+            "ridgecv_loo": lambda: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1),
+            "one_cycle": lambda: ridge.nested_cross_validation_one_cycle(alphas),
+        }
 
-        # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
-        alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
+        resume_par_methode = {}
+        for nom_methode, executer in methodes.items():
+            print(f"\n{'-'*60}\n[MÉTHODE] {nom_methode}\n{'-'*60}")
+            resultats = executer()
+            resume_par_methode[nom_methode] = ridge.generer_toutes_les_figures(nom_methode, resultats, alphas)
 
-        print(f"Variance inter-folds moyenne : {np.mean(r2_variance_inter_folds):.6f}")
+        # ── Comparaison entre méthodes ──────────────────────────────────────
+        print(f"\n{'='*60}\n  Comparaison des méthodes — {SUB}\n{'='*60}")
+        print(f"{'Méthode':15s} | {'R² moyen':>10s} | {'R² médian':>10s} | {'R² max':>10s}")
+        for nom_methode, resume in resume_par_methode.items():
+            r2 = resume["r2_moyen"]
+            print(f"{nom_methode:15s} | {np.mean(r2):10.4f} | {np.median(r2):10.4f} | {np.max(r2):10.4f}")
 
-        # ── Génération de l'ensemble des figures ──────────────────────────
-        print("\n[GÉNÉRATION DES FIGURES]")
-
-        # 1. Cartes Cérébrales (Nilearn 3D)
-        print(" -> Création des cartes cérébrales (R², Alphas, TSNR)...")
-        ridge.brain_mapping_r2(r2_moyen, suffix="_nested_moyen")
-        ridge.brain_mapping_alphas(alphas_moyens, suffix="_nested_moyen")
-        ridge.brain_mapping_tsnr(tsnr, suffix="_nested")
-
-        # 2. Histogrammes des paramètres de régularisation (Alphas)
-        print(" -> Création des histogrammes des alphas...")
-        ridge.plot_alphas_histogram(alphas_fold=alphas_tous_externes, grille_alphas=alphas, suffix="_nested_folds")
-        print("Best Alphas Inner : ", best_alphas_inner)
-        ridge.plot_alphas_histogram(alphas_fold=best_alphas_inner, grille_alphas=alphas, suffix="_nested_folds_inner")
-        ridge.plot_alphas_histogram(alphas_fold=None, grille_alphas=alphas, alphas_finaux=alphas_moyens, suffix="_nested_moyen")
-
-        # 3. Métriques de performance R²
-        print(" -> Création des graphiques de distribution de l'accuracy...")
-        ridge.plot_r2_distribution(r2_tous_les_tests, suffix="_nested")
-        ridge.plot_r2_threshold(r2_tous_les_tests, suffix="_nested")
-        ridge.plot_accuracy(r2_tous_les_tests)
-
-        # 4. Analyse par Région d'Intérêt (ROI)
-        print(" -> Création de l'analyse par ROI...")
-        if flag_precision_voxel:
-            # Cette fonction nécessite les données au niveau du voxel
-            ridge.plot_ROImask_histogram(r2_moyen)
-        else:
-            print(" -> (Ignoré : l'analyse par ROI nécessite flag_precision_voxel = True)")
+        # ── Baseline randomisée (randomization test), méthode manuelle uniquement ──
+        print(f"\n{'='*60}\n  Randomization test — {SUB} (nested_cross_validation_full_manuel)\n{'='*60}")
+        ridge_random = RidgeRegression(
+            plateforme, SUB, LAYER,
+            flag_delai_bold_brute, centrage_donne_temps,
+            flag_precision_voxel, ROImask_flag, randomize_flag=True
+        )
+        resultats_random = ridge_random.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1)
+        ridge_random.generer_toutes_les_figures("full_manuel_randomise", resultats_random, alphas)
 
         print(f"\nTerminé pour le sujet {SUB}. Toutes les figures ont été sauvegardées.")
