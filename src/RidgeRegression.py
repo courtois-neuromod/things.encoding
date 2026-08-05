@@ -1,36 +1,39 @@
 """
 Régression Ridge pour l'encodage cérébral THINGS memory.
-Entraîne une RidgeCV par couche et évalue la prédiction.
+Entraîne une Ridge (grille d'alphas balayée manuellement) par couche et évalue la prédiction.
 """
+from dataclasses import dataclass
+import gc
 from pathlib import Path
+import warnings
+
+import h5py
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
+from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
+from nilearn.plotting import plot_stat_map
+import numpy as np
+import pandas as pd
+from scipy.linalg import LinAlgWarning
+import seaborn as sns
+from sklearn.linear_model import Ridge
+from sklearn.metrics import r2_score
+from sklearn.model_selection import LeaveOneGroupOut
+from sklearn.preprocessing import StandardScaler
 
 from GroupShuffleSplitSession import GroupShuffleSplitSession
 from TribeHDF5Normalization import TribeHDF5Normalization
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import RidgeCV
-from sklearn.pipeline import make_pipeline
-from sklearn.metrics import make_scorer, r2_score
-from sklearn.model_selection import LeaveOneGroupOut, cross_validate
-from sklearn.compose import TransformedTargetRegressor
-from sklearn.multioutput import MultiOutputRegressor
-import numpy as np
-import pandas as pd
-import h5py
-import gc
-from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
-from nilearn.plotting import plot_stat_map
-import matplotlib
-from matplotlib.ticker import FuncFormatter
-import matplotlib.pyplot as plt
-from dataclasses import dataclass
-import seaborn as sns
-import warnings
-from scipy.linalg import LinAlgWarning
 
 # Ignore spécifiquement les avertissements de matrices mal conditionnées
 warnings.filterwarnings(action='ignore', category=LinAlgWarning)
 
 matplotlib.use('Agg')
+
+DPI_FIGURES = 300
+T_TRIBE_S = 0.5
+TR_IRMF_S = 1.49
+SEUIL_AFFICHAGE_BRAIN_MAP = 0.01
 
 @dataclass
 class CheminsProjet:
@@ -192,8 +195,8 @@ class RidgeRegression:
                     tribe_layer=self.layer,
                     cneuromod_ses=cneuromod_ses,
                     cneuromod_dataset=cneuromod_dataset,
-                    t_Tribe_s=0.5,
-                    TR_irmf_s=1.49,
+                    t_Tribe_s=T_TRIBE_S,
+                    TR_irmf_s=TR_IRMF_S,
                     flag_delai_bold_brute=self.flag_delai_bold_brute,
                     centrage_donne_temps=self.centrage_donne_temps,
                 )
@@ -244,12 +247,6 @@ class RidgeRegression:
 
     def nested_cross_validation(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
         """Validation croisée imbriquée 100% manuelle (sélection d'alpha par moyenne des courbes R² inter-folds internes)."""
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.model_selection import LeaveOneGroupOut
-        from sklearn.linear_model import Ridge
-        from sklearn.metrics import r2_score
-        import gc
-
         X, Y, groupes, TSNR = self._selection_X_Y()
         n_features = Y.shape[1]
 
@@ -258,6 +255,7 @@ class RidgeRegression:
 
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
+        best_alphas_inner_toutes_folds = []
 
         # 2. BOUCLE EXTERNE : Évaluation de la stabilité du modèle
         for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes)):
@@ -270,7 +268,6 @@ class RidgeRegression:
             inner_splits = list(inner_cv.split(X_train, Y_train, groups=groupes_train))
 
             n_inner_folds = len(inner_splits)
-            best_alphas_inner = np.zeros((n_inner_folds, n_features), dtype=np.float64)
             r2_par_alpha_cumul = np.zeros((len(grille_alphas), n_features), dtype=np.float64)
 
             # On teste chaque fold interne (une session isolée en validation)
@@ -302,7 +299,7 @@ class RidgeRegression:
                 # (bruité par construction, sert à visualiser la variabilité inter-sessions,
                 # ne sert plus à calculer l'alpha final)
                 best_indices_fold = np.argmax(r2_par_alpha, axis=0)
-                best_alphas_inner[j, :] = grille_alphas[best_indices_fold]
+                best_alphas_inner_toutes_folds.append(grille_alphas[best_indices_fold])
 
                 r2_par_alpha_cumul += r2_par_alpha
 
@@ -344,8 +341,17 @@ class RidgeRegression:
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
+        best_alphas_inner = np.array(best_alphas_inner_toutes_folds)
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, TSNR
+
+    def _sauvegarder_figure(self, figure_sauvegardable, nom_fichier, message, **kwargs_savefig):
+        """Sauvegarde une figure (matplotlib Figure ou display Nilearn) dans output/ et affiche un message."""
+        chemins = self.get_path_file_by_plateform(self.plateforme)
+        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
+        figure_sauvegardable.savefig(chemin_sortie, dpi=DPI_FIGURES, **kwargs_savefig)
+        print(f"{message} : {chemin_sortie}")
+        return chemin_sortie
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
         """Affiche un résumé (moyenne, médiane, max, part de R² positifs) des scores R²."""
@@ -395,12 +401,9 @@ class RidgeRegression:
         ax.legend()
         plt.tight_layout()
 
-        chemins = self.get_path_file_by_plateform(self.plateforme)
         nom_fichier = f"r2_distribution_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
-        plt.savefig(chemin_sortie, dpi=300)
-        plt.close()
-        print(f"Distribution R² sauvegardée : {chemin_sortie}")
+        self._sauvegarder_figure(fig, nom_fichier, "Distribution R² sauvegardée")
+        plt.close(fig)
 
     def plot_ROImask_histogram(self, scores_finaux):
         """Trace un boxplot des R² par ROI (voxelwise uniquement) et l'enregistre en HTML."""
@@ -454,8 +457,8 @@ class RidgeRegression:
                 plt.tight_layout()
 
                 nom_fichier = f"ROImask_{self.subject}_{self.layer}.png"
-                plt.savefig(chemins.root_encoding / "output" / nom_fichier, dpi=300, bbox_inches="tight")
-                plt.close()
+                self._sauvegarder_figure(fig, nom_fichier, "ROImask sauvegardé", bbox_inches="tight")
+                plt.close(fig)
         else:
             return "Pas en voxel"
 
@@ -496,12 +499,9 @@ class RidgeRegression:
 
         plt.tight_layout()
 
-        chemins = self.get_path_file_by_plateform(self.plateforme)
         nom_fichier = f"r2_threshold_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
-        plt.savefig(chemin_sortie, dpi=300)
-        plt.close()
-        print(f"Threshold R² sauvegardé : {chemin_sortie}")
+        self._sauvegarder_figure(fig, nom_fichier, "Threshold R² sauvegardé")
+        plt.close(fig)
 
     def plot_accuracy(self, r2_tous_les_tests):
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels ou n_parcelles,)
@@ -556,12 +556,9 @@ class RidgeRegression:
 
         plt.tight_layout()
 
-        chemins = self.get_path_file_by_plateform(self.plateforme)
         nom_fichier = f"accuracy_{self.subject}_{self.layer}.png"
-        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
-        plt.savefig(chemin_sortie, dpi=300)
-        plt.close()
-        print(f"Accuracy sauvegardée : {chemin_sortie}")
+        self._sauvegarder_figure(fig, nom_fichier, "Accuracy sauvegardée")
+        plt.close(fig)
 
 
     def plot_alphas_histogram(self, alphas_fold, grille_alphas, alphas_finaux=None, suffix=""):
@@ -607,12 +604,10 @@ class RidgeRegression:
         ax.set_title(titre)
         plt.tight_layout()
         nom_fichier = f"histogram_alphas_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        chemin_sortie = self.get_path_file_by_plateform(self.plateforme).root_encoding / "output" / nom_fichier
-        plt.savefig(chemin_sortie, dpi=300)
-        plt.close()
-        print(f"Histogramme alphas sauvegardé : {chemin_sortie}")
+        self._sauvegarder_figure(fig, nom_fichier, "Histogramme alphas sauvegardé")
+        plt.close(fig)
 
-    def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold = 0.01, echelle_log=False, vmin = None, vmax = None, suffix=""):
+    def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin = None, vmax = None, suffix=""):
         """Projette un vecteur de scores (R², alphas, TSNR...) sur le cerveau et enregistre la carte statistique en PNG."""
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
@@ -652,21 +647,19 @@ class RidgeRegression:
         if echelle_log and display._cbar is not None:
             display._cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda valeur, position: f"$10^{{{valeur:.0f}}}$"))
 
-        chemin_sortie = chemins.root_encoding / "output" / f"brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}{suffix}.png"
-        display.savefig(chemin_sortie, dpi=300)
+        nom_fichier = f"brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}{suffix}.png"
+        self._sauvegarder_figure(display, nom_fichier, "Carte cérébrale sauvegardée")
         display.close()
         plt.close(fig)
-        print(f"Carte cérébrale sauvegardée : {chemin_sortie}")
-        return
 
     def brain_mapping_r2(self, scores_r2, noms_parcelles=None, suffix=""):
         """Affiche le résumé des R² et enregistre la carte cérébrale correspondante."""
         self.print_scores(scores_r2, noms_parcelles)
-        self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=0.01, echelle_log=False, vmin=0, vmax=np.max(scores_r2), suffix=suffix)
+        self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin=0, vmax=np.max(scores_r2), suffix=suffix)
 
     def brain_mapping_alphas(self, alphas_tous_les_lots, suffix=""):
         """Enregistre la carte cérébrale des alphas optimaux (échelle log10)."""
-        self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0.01, echelle_log=True, suffix=suffix)
+        self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=True, suffix=suffix)
 
     def brain_mapping_tsnr(self, tsnr, suffix=""):
         """Enregistre la carte cérébrale correspondante."""
@@ -758,33 +751,3 @@ if __name__ == "__main__":
             print(" -> (Ignoré : l'analyse par ROI nécessite flag_precision_voxel = True)")
 
         print(f"\nTerminé pour le sujet {SUB}. Toutes les figures ont été sauvegardées.")
-        """
-        print("\n[ÉTAPE 1] Cross-validation — optimisation des alphas")
-        scores_r2, r2_fold, alphas_finaux, alphas_fold = ridge.cross_validation(alphas)
-        ridge.plot_alphas_histogram(alphas_fold, grille_alphas=alphas, suffix="_cv")
-
-        print("\n[ÉTAPE 2] Évaluation finale stricte sur sessions 14-15-16")
-        r2_test, alphas_utilises = ridge.evaluation_finale(alphas_finaux)
-
-        ridge.brain_mapping_r2(r2_test, suffix="_test_final")
-        ridge.brain_mapping_alphas(alphas_utilises, suffix="_test_final")
-        ridge.plot_alphas_histogram(alphas_fold=None, grille_alphas=alphas,
-                                    alphas_finaux=alphas_utilises, suffix="_test_final")
-        ridge.plot_ROImask_histogram(r2_test, liste_ROI)
-
-        print("\n[ÉTAPE 3] TSNR")
-        ridge.brain_mapping_tsnr()
-
-        # ── Alignement randomisé (baseline) ─────────────────────────────────
-        print("\n[ÉTAPE 4] Baseline — alignement randomisé")
-        ridge_random = RidgeRegression(
-            plateforme, SUB, LAYER,
-            flag_delai_bold_brute, centrage_donne_temps,
-            flag_precision_voxel, ROImask_flag, randomize_flag=True
-        )
-
-        scores_r2_random, _, alphas_finaux_random, alphas_fold_random = ridge_random.cross_validation(alphas)
-        r2_test_random, _ = ridge_random.evaluation_finale(alphas_finaux_random)
-
-        ridge_random.brain_mapping_r2(r2_test_random, suffix="_randomise")
-        """
