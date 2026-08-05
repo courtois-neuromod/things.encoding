@@ -17,9 +17,11 @@ import numpy as np
 import pandas as pd
 from scipy.linalg import LinAlgWarning
 import seaborn as sns
-from sklearn.linear_model import Ridge
+from sklearn.compose import TransformedTargetRegressor
+from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.metrics import r2_score
 from sklearn.model_selection import LeaveOneGroupOut
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from GroupShuffleSplitSession import GroupShuffleSplitSession
@@ -88,25 +90,6 @@ class RidgeRegression:
             chemin_anatomie = None
 
         return CheminsProjet(ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas, chemin_ROImask, chemin_anatomie)
-
-    def get_chemin_annotations_parcelles(self, plateforme):
-        """Retourne le chemin du fichier TSV contenant les noms des parcelles de l'atlas."""
-        nom_fichier_annotations = (
-            "tpl-MNI152NLin2009cAsym_atlas-Schaefer2018TianS3NettekovenAsym_"
-            "desc-1000Parcels7Networks50Subcort128Cereb_parcelAnnotations.tsv"
-        )
-        if plateforme == "Rorqual":
-            ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
-            return ROOT_ENCODING / "data" / "brain_map_subj" / nom_fichier_annotations
-        else:
-            ROOT = Path(__file__).parent.parent
-            return ROOT / "data" / "brain_map_subj" / nom_fichier_annotations
-
-    def charger_noms_parcelles(self, plateforme):
-        """Charge la liste des noms de parcelles depuis le fichier d'annotations."""
-        chemin_annotations = self.get_chemin_annotations_parcelles(plateforme)
-        annotations = pd.read_csv(chemin_annotations, sep="\t")
-        return annotations["name"].tolist()
 
     def discover_runs(self,tribe_hdf5=None):
         """Liste les runs disponibles dans le fichier HF5 contenant les embeddings TRIBE et fait correspondre
@@ -245,8 +228,28 @@ class RidgeRegression:
             X, Y, groupes = X[masque], Y[masque], groupes[masque]
         return X, Y, groupes, TSNR
 
-    def nested_cross_validation(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
-        """Validation croisée imbriquée 100% manuelle (sélection d'alpha par moyenne des courbes R² inter-folds internes)."""
+    def nested_cross_validation_full_manuel(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
+        """Validation croisée imbriquée 100% manuelle, jumeau de `nested_cross_validation_ridgecv_loo`.
+
+        Même split externe par session (GroupShuffleSplitSession) et même principe
+        (un alpha optimal par voxel/parcelle), mais la sélection d'alpha en boucle
+        interne est faite à la main : `LeaveOneGroupOut` (une session isolée à la
+        fois) + refit d'un `Ridge` pour chaque alpha de la grille, sur chaque fold
+        interne. L'alpha final par voxel est choisi en moyennant d'abord les
+        courbes R²(alpha) sur tous les folds internes, puis en prenant l'argmax
+        de cette courbe moyennée (plus stable qu'une moyenne d'argmax bruités,
+        cf. commentaire plus bas).
+
+        Attention : coûteux. Pour n_folds folds externes × n sessions internes ×
+        len(grille_alphas) alphas, ça fait n_folds × n × len(grille_alphas) refits
+        de `Ridge()` (~5000 fits pour une config typique 10×25×20), chacun
+        recalculant une décomposition depuis zéro. C'est l'unique raison d'être
+        de `nested_cross_validation_ridgecv_loo` : remplacer ce triple `for` par
+        `RidgeCV(cv=None)`, qui calcule l'équivalent analytiquement en un seul
+        fit — mais uniquement disponible en Leave-One-Out (par timepoint), pas en
+        Leave-One-Group-Out (par session), d'où la seule différence algorithmique
+        entre les deux jumeaux.
+        """
         X, Y, groupes, TSNR = self._selection_X_Y()
         n_features = Y.shape[1]
 
@@ -344,6 +347,72 @@ class RidgeRegression:
         best_alphas_inner = np.array(best_alphas_inner_toutes_folds)
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, TSNR
+
+    def nested_cross_validation_ridgecv_loo(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
+        """Jumeau sklearn-natif de `nested_cross_validation_full_manuel`.
+
+        Même split externe par session (GroupShuffleSplitSession) et même principe
+        (un alpha optimal par voxel/parcelle), mais la boucle interne manuelle
+        (LeaveOneGroupOut + refit d'un Ridge pour chaque alpha de la grille) est
+        remplacée par RidgeCV(cv=None), qui sélectionne l'alpha via un Leave-One-Out
+        efficace calculé analytiquement (pas de refit par échantillon ni par alpha).
+        C'est l'unique différence algorithmique avec la version manuelle : LOO
+        (par timepoint) au lieu de LOGO (par session).
+
+        Attention (voir évaluation) : le LOO ignore la structure de session/
+        autocorrélation temporelle que LOGO respectait explicitement pour la
+        sélection d'alpha — les alphas et R² obtenus ne sont donc pas strictement
+        comparables scientifiquement à ceux de `nested_cross_validation_full_manuel`, seulement
+        comparables en termes de mécanique/temps de calcul.
+        """
+        X, Y, groupes, TSNR = self._selection_X_Y()
+        n_features = Y.shape[1]
+
+        outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
+
+        r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
+        alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
+
+        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes)):
+            print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
+
+            X_train, Y_train = X[train_idx], Y[train_idx]
+            X_test, Y_test = X[test_idx], Y[test_idx]
+
+            # StandardScaler() sur X : fit sur train, transform sur test (Pipeline = 0 fuite).
+            # RidgeCV(cv=None) : Leave-One-Out natif et efficace (raccourci algébrique,
+            # cf. sklearn.linear_model.RidgeCV). alpha_per_target=True : un alpha par
+            # voxel, uniquement compatible avec cv=None (LOO).
+            # TransformedTargetRegressor : standardise Y_train, entraîne dessus, et
+            # dé-standardise automatiquement les prédictions à l'inverse_transform.
+            modele = TransformedTargetRegressor(
+                regressor=make_pipeline(
+                    StandardScaler(),
+                    RidgeCV(alphas=grille_alphas, alpha_per_target=True, cv=None, scoring="r2"),
+                ),
+                transformer=StandardScaler(),
+            )
+            modele.fit(X_train, Y_train)
+
+            ridgecv_ajuste = modele.regressor_.named_steps["ridgecv"]
+            alphas_tous_externes[i, :] = ridgecv_ajuste.alpha_
+
+            # Prédictions déjà ramenées à l'échelle d'origine par TransformedTargetRegressor
+            Y_pred = modele.predict(X_test)
+            r2_score_fold = r2_score(Y_test, Y_pred, multioutput='raw_values')
+            r2_tous_les_tests[i, :] = r2_score_fold
+            print(f"-> R2 mean : {np.mean(r2_score_fold)}")
+            print(f"-> R2 max : {np.max(r2_score_fold)}")
+
+            # Nettoyage mémoire
+            del modele, Y_pred
+            gc.collect()
+
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)
+        r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
+        alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
+
+        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
     def _sauvegarder_figure(self, figure_sauvegardable, nom_fichier, message, **kwargs_savefig):
         """Sauvegarde une figure (matplotlib Figure ou display Nilearn) dans output/ et affiche un message."""
@@ -712,8 +781,8 @@ if __name__ == "__main__":
             flag_precision_voxel, ROImask_flag, randomize_flag=False
         )
 
-        print("\n[TEST] nested_cross_validation")
-        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, tsnr = ridge.nested_cross_validation(alphas, 10, 0.1)
+        print("\n[TEST] nested_cross_validation_full_manuel")
+        r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, tsnr = ridge.nested_cross_validation_full_manuel(alphas, 10, 0.1)
 
         # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
         alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
