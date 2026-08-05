@@ -27,58 +27,51 @@ tsv_files = sorted(DATA_DIR.rglob("*_events.tsv"))
 
 print(f"{len(tsv_files)} fichiers TSV trouvés au total sur {plateforme}.")
 
-compteur_images = {}
+# -- Étape 1 : construction de la liste des images distinctes --
+# Pour chaque image distincte, on garde sa première occurrence (onset, offset, vidéo source)
+images_distinctes = {}
 
 for path_tsv in tsv_files:
     base_name = path_tsv.name.replace("_events.tsv", "")
-
-    # -- Choix de la vidéo --
-    if plateforme == "Rorqual":
-
-        path_video = CFR_DIR / f"{base_name}_desc-CFR.mp4"
-    else:
-        path_video = CFR_DIR / f"{base_name}_desc-CFR.mp4"
+    path_video = CFR_DIR / f"{base_name}_desc-CFR.mp4"
 
     # Vérification si la vidéo source existe bien
     if not path_video.exists():
         print(f"Vidéo introuvable : {path_video.name}, on passe au suivant.")
         continue
 
-    print(f"\n Traitement de : {base_name}")
-
     df = pd.read_csv(path_tsv, sep='\t')
-    segmenteur = VideoSegmenteur(path_video, OUTPUT_DIR)
 
     for idx, row in df.iterrows():
-        onset = row.iloc[17]
-        offset = row.iloc[18]
-        duration = offset - onset - 0.5
-
         valeur_image = str(row.iloc[1])
         if pd.isna(valeur_image) or valeur_image == "nan":
             continue
 
-        nom_stem = Path(valeur_image).stem
-        if '_' in nom_stem:
-            image_name = nom_stem.rsplit('_', 1)[0]
-        else:
-            image_name = nom_stem
+        image_name = Path(valeur_image).stem
 
-        compteur_images[image_name] = compteur_images.get(image_name, 0) + 1
-        occurrence_actuelle = compteur_images[image_name]
-
-        if occurrence_actuelle == 1:
-            nom_fichier_3s = f"{image_name}.mp4"
-            nom_fichier_100s = f"{image_name}_100s.mp4"
-        else:
-            nom_fichier_3s = f"{image_name}__{occurrence_actuelle}.mp4"
-            nom_fichier_100s = f"{image_name}_{occurrence_actuelle}_100s.mp4"
-
-        input_video_path = str(OUTPUT_DIR / nom_fichier_3s)
-        output_video_path = str(OUTPUT_DIR / nom_fichier_100s)
-
-        if Path(output_video_path).exists():
+        if image_name in images_distinctes:
             continue
 
-        segmenteur.create_segment(onset, duration, input_video_path)
-        segmenteur.etendre_video(100, input_video_path, output_video_path)
+        onset = row.iloc[17]
+        offset = row.iloc[18]
+        images_distinctes[image_name] = (onset, offset, path_video)
+
+print(f"{len(images_distinctes)} images distinctes trouvées.\n")
+
+# -- Étape 2 : création d'une vidéo de 100s par image distincte --
+for image_name, (onset, offset, path_video) in images_distinctes.items():
+    nom_fichier_100s = f"{image_name}_100s.mp4"
+    output_video_path = OUTPUT_DIR / nom_fichier_100s
+
+    if output_video_path.exists():
+        print(f"Vidéo déjà créée, on passe : {nom_fichier_100s}")
+        continue
+
+    duration = offset - onset - 0.5
+    nom_fichier_3s = f"{image_name}.mp4"
+    input_video_path = str(OUTPUT_DIR / nom_fichier_3s)
+
+    segmenteur = VideoSegmenteur(path_video, OUTPUT_DIR)
+    segmenteur.create_segment(onset, duration, input_video_path)
+    segmenteur.etendre_video(100, input_video_path, str(output_video_path))
+    print(f"Vidéo créée : {nom_fichier_100s}")
