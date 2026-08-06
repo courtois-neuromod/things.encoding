@@ -20,7 +20,7 @@ import seaborn as sns
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.metrics import r2_score
-from sklearn.model_selection import LeaveOneGroupOut
+from sklearn.model_selection import LeaveOneGroupOut, LeaveOneOut
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -610,6 +610,15 @@ class RidgeRegression:
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
+    def afficher_X_Y_LeaveOneOut(self):
+        X, Y, groupes, TSNR = self._selection_X_Y()
+        loo = LeaveOneOut()
+        for i, (train_index, test_index) in enumerate(loo.split(X)):
+            print(f"Fold {i}:")
+            print(f"  Train: index={train_index}")
+            print(f"  Test:  index={test_index}")
+
+
     def _sauvegarder_figure(self, figure_sauvegardable, nom_fichier, message, **kwargs_savefig):
         """Sauvegarde une figure (matplotlib Figure ou display Nilearn) dans output/ et affiche un message."""
         chemins = self.get_path_file_by_plateform(self.plateforme)
@@ -1126,6 +1135,9 @@ if __name__ == "__main__":
             flag_precision_voxel, ROImask_flag, randomize_flag=False
         )
 
+        ridge.afficher_X_Y_LeaveOneOut()
+
+        """
         # ── Les 3 méthodes de validation croisée ───────────────────────────
         methodes = {
             "full_manuel": lambda: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1),
@@ -1157,3 +1169,4 @@ if __name__ == "__main__":
         ridge_random.generer_toutes_les_figures("full_manuel_randomise", resultats_random, alphas)
 
         print(f"\nTerminé pour le sujet {SUB}. Toutes les figures ont été sauvegardées.")
+        """
