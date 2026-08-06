@@ -262,10 +262,22 @@ class RidgeRegression:
         (un alpha optimal par voxel/parcelle), mais la sélection d'alpha en boucle
         interne est faite à la main : `LeaveOneGroupOut` (une session isolée à la
         fois) + refit d'un `Ridge` pour chaque alpha de la grille, sur chaque fold
-        interne. L'alpha final par voxel est choisi en moyennant d'abord les
-        courbes R²(alpha) sur tous les folds internes, puis en prenant l'argmax
-        de cette courbe moyennée (plus stable qu'une moyenne d'argmax bruités,
-        cf. commentaire plus bas).
+        interne.
+
+        Agrégation du critère de sélection, calquée sur le mécanisme réel de
+        `RidgeCV(cv=None)` (vérifié dans le code source de `_RidgeGCV.fit()`,
+        classe interne de scikit-learn) : scikit-learn ne moyenne PAS des R²
+        calculés séparément par fold. Il construit un seul vecteur `predictions`
+        recouvrant TOUS les échantillons d'entraînement (une prédiction "laissé de
+        côté" par échantillon), puis appelle le scorer UNE SEULE FOIS sur ce
+        vecteur complet pour obtenir un R² poolé par alpha. On reproduit ici
+        exactement la même logique, en gardant le LOGO (session entière isolée)
+        au lieu du LOO (un seul timepoint) : les résidus au carré de chaque fold
+        interne sont accumulés (`ssr_cumul_par_alpha`), puis le R² poolé est
+        calculé une seule fois après la boucle interne, comme le ferait
+        `_RidgeGCV`. (Équivalent mathématiquement à stocker toutes les
+        prédictions et appeler `r2_score` une fois dessus, comme sklearn, mais
+        sans le coût mémoire prohibitif à l'échelle voxel.)
 
         Attention : coûteux. Pour n_folds folds externes × n sessions internes ×
         len(grille_alphas) alphas, ça fait n_folds × n × len(grille_alphas) refits
@@ -297,8 +309,15 @@ class RidgeRegression:
             inner_cv = LeaveOneGroupOut()
             inner_splits = list(inner_cv.split(X_train, Y_train, groups=groupes_train))
 
-            n_inner_folds = len(inner_splits)
-            r2_par_alpha_cumul = np.zeros((len(grille_alphas), n_features), dtype=np.float64)
+            # Comme _RidgeGCV : le dénominateur du R² poolé (SST) ne dépend que des
+            # vraies valeurs, pas de l'alpha ni du fold interne -> calculé une seule
+            # fois ici, sur TOUT Y_train (puisque le LOGO partitionne Y_train sans
+            # recouvrement, l'union des validations internes = Y_train en entier).
+            Y_train_moyenne = Y_train.mean(axis=0)
+            sst_total = np.sum((Y_train - Y_train_moyenne) ** 2, axis=0)
+
+            # Accumulateur du numérateur du R² poolé (SSR), un par alpha.
+            ssr_cumul_par_alpha = np.zeros((len(grille_alphas), n_features), dtype=np.float64)
 
             # On teste chaque fold interne (une session isolée en validation)
             for j, (inner_train_idx, inner_val_idx) in enumerate(inner_splits):
@@ -310,35 +329,45 @@ class RidgeRegression:
 
                 scaler_Y_inner = StandardScaler()
                 Y_inner_train_scaled = scaler_Y_inner.fit_transform(Y_train[inner_train_idx])
-                Y_inner_val_scaled = scaler_Y_inner.transform(Y_train[inner_val_idx])
 
-                # Tableau pour stocker les R² de chaque alpha
-                r2_par_alpha = np.zeros((len(grille_alphas), n_features))
+                # Vérité terrain de ce fold interne, en unités BRUTES (pas standardisées) :
+                # nécessaire pour pouvoir accumuler des résidus cohérents entre folds,
+                # puisque chaque fold a son propre scaler_Y_inner (fit sur des données
+                # différentes à chaque fois).
+                Y_inner_val_brut = Y_train[inner_val_idx]
+
+                # Tableau pour stocker les R² de CE fold interne (diagnostic uniquement)
+                r2_par_alpha_ce_fold = np.zeros((len(grille_alphas), n_features))
 
                 # On teste chaque alpha de la grille explicitement
                 for a_idx, alpha in enumerate(grille_alphas):
                     # Un seul modèle Ridge pour tout le cerveau
                     ridge_inner = Ridge(alpha=alpha)
                     ridge_inner.fit(X_inner_train_scaled, Y_inner_train_scaled)
-                    Y_inner_pred = ridge_inner.predict(X_inner_val_scaled)
+                    Y_inner_pred_scaled = ridge_inner.predict(X_inner_val_scaled)
 
-                    # On stocke les performances de cet alpha pour toutes les parcelles
-                    r2_par_alpha[a_idx, :] = r2_score(Y_inner_val_scaled, Y_inner_pred, multioutput='raw_values')
+                    # Retour en unités brutes pour pouvoir accumuler across folds
+                    Y_inner_pred_brut = scaler_Y_inner.inverse_transform(Y_inner_pred_scaled)
 
-                # Diagnostic uniquement : meilleur alpha de CE fold interne, par voxel
-                # (bruité par construction, sert à visualiser la variabilité inter-sessions,
-                # ne sert plus à calculer l'alpha final)
-                best_indices_fold = np.argmax(r2_par_alpha, axis=0)
+                    # Accumulation du numérateur (SSR) du R² poolé, comme _RidgeGCV
+                    # accumule implicitement toutes les prédictions LOO avant de
+                    # n'appeler le scorer qu'une seule fois.
+                    ssr_cumul_par_alpha[a_idx, :] += np.sum((Y_inner_val_brut - Y_inner_pred_brut) ** 2, axis=0)
+
+                    # Diagnostic uniquement : R² de CE fold interne, pour la figure
+                    # "alphas internes" (best_alphas_inner) -- ne sert plus a choisir
+                    # l'alpha final, seulement a visualiser la variabilite inter-sessions.
+                    r2_par_alpha_ce_fold[a_idx, :] = r2_score(Y_inner_val_brut, Y_inner_pred_brut, multioutput='raw_values')
+
+                best_indices_fold = np.argmax(r2_par_alpha_ce_fold, axis=0)
                 best_alphas_inner_toutes_folds.append(grille_alphas[best_indices_fold])
 
-                r2_par_alpha_cumul += r2_par_alpha
-
-            # Sélection finale : on moyenne d'abord les courbes R²(alpha) sur les folds
-            # internes, puis on prend l'argmax par voxel sur cette courbe moyennée.
-            # (moyenner des argmax bruités - via la moyenne géométrique - amplifie les
-            # cas où un seul fold interne bascule au bord de la grille)
-            r2_par_alpha_moyen = r2_par_alpha_cumul / n_inner_folds
-            best_indices = np.argmax(r2_par_alpha_moyen, axis=0)
+            # Sélection finale : R² poolé sur TOUTES les prédictions internes réunies
+            # (calculé une seule fois, comme le fait _RidgeGCV._score), puis argmax
+            # par voxel sur cette courbe poolée -- plus stable qu'une moyenne de R²
+            # calculés séparément sur chaque petit fold interne.
+            r2_par_alpha_poole = 1 - (ssr_cumul_par_alpha / sst_total)
+            best_indices = np.argmax(r2_par_alpha_poole, axis=0)
             alpha_optimal = grille_alphas[best_indices]
             alphas_tous_externes[i, :] = alpha_optimal
 
@@ -485,6 +514,18 @@ class RidgeRegression:
         Test et chaque bloc de Validation de leurs voisines immédiates pour limiter
         la fuite due à l'autocorrélation temporelle inter-sessions.
 
+        Contrairement à `nested_cross_validation_full_manuel`, il n'y a ici qu'UN
+        SEUL bloc de Validation par fold (pas plusieurs folds internes à agréger) :
+        le problème de "moyenne de R² bruités par petit fold" qui affectait
+        `full_manuel` ne se pose donc pas ici. Par cohérence avec le mécanisme
+        réel de `_RidgeGCV._score()` (qui score toujours sur `unscaled_y`, la
+        cible en unités brutes, jamais sur la version centrée/standardisée utilisée
+        pour le fit), le R² de sélection est calculé ici aussi en unités brutes
+        (prédictions dé-standardisées via `scaler_Y_selection.inverse_transform`)
+        plutôt que dans l'espace standardisé — sans effet numérique sur l'alpha
+        choisi (le R² est invariant à une transformation affine), mais pour rester
+        cohérent avec les deux autres jumeaux.
+
         Voir `_generer_folds_one_cycle` pour le détail du découpage.
         """
         X, Y, groupes, TSNR = self._selection_X_Y()
@@ -523,14 +564,18 @@ class RidgeRegression:
 
             scaler_Y_selection = StandardScaler()
             Y_train_scaled_selection = scaler_Y_selection.fit_transform(Y_train)
-            Y_val_scaled = scaler_Y_selection.transform(Y_val)
 
             r2_par_alpha = np.zeros((len(grille_alphas), n_features))
             for a_idx, alpha in enumerate(grille_alphas):
                 ridge_selection = Ridge(alpha=alpha)
                 ridge_selection.fit(X_train_scaled_selection, Y_train_scaled_selection)
-                Y_val_pred = ridge_selection.predict(X_val_scaled)
-                r2_par_alpha[a_idx, :] = r2_score(Y_val_scaled, Y_val_pred, multioutput='raw_values')
+                Y_val_pred_scaled = ridge_selection.predict(X_val_scaled)
+
+                # Retour en unités brutes avant de scorer, comme _RidgeGCV._score()
+                # qui compare toujours ses prédictions à "unscaled_y" (jamais à la
+                # cible standardisée utilisée pour le fit).
+                Y_val_pred_brut = scaler_Y_selection.inverse_transform(Y_val_pred_scaled)
+                r2_par_alpha[a_idx, :] = r2_score(Y_val, Y_val_pred_brut, multioutput='raw_values')
 
             alpha_optimal = grille_alphas[np.argmax(r2_par_alpha, axis=0)]
             alphas_tous_externes[i, :] = alpha_optimal
