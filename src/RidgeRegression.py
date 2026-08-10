@@ -611,7 +611,7 @@ class RidgeRegression:
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
     def afficher_X_Y_LeaveOneOut(self):
-        X, Y, groupes, TSNR = self._selection_X_Y()
+        X, Y, _, _ = self._selection_X_Y()
         loo = LeaveOneOut()
         for i, (train_index, test_index) in enumerate(loo.split(X)):
             print(f"Fold {i}:")
@@ -1113,7 +1113,7 @@ if __name__ == "__main__":
 
     # --- PARAMÈTRES ---
     plateforme = ["Rorqual", "Mac"]
-    plateforme = plateforme[0]
+    plateforme = plateforme[1]
 
     liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
     liste_sujets = liste_sujets[2:3]
