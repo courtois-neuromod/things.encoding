@@ -48,12 +48,12 @@ class TribeHDF5Normalization:
         ]
         resultat = subprocess.run(commande_metadata_video, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         duree_reelle = float(resultat.stdout.strip())
-        print(f"[Info] Durée lue par ffprobe : {int(duree_reelle)} secondes")
+        #print(f"[Info] Durée lue par ffprobe : {int(duree_reelle)} secondes")
         return int(duree_reelle)
 
     def executer_pipeline(self,tribe_hdf5=None, cneuromod_hdf5=None):
         """Exécute l'intégralité du pipeline de nettoyage et d'alignement."""
-        #print("[Traitement en cours] Ouverture des fichiers HDF5...")
+        #print("[Traitement en cours] Ouverture des fichiers HDF5 + Alignement...")
 
         gere_localement = tribe_hdf5 is None and cneuromod_hdf5 is None
 

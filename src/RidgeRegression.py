@@ -1,6 +1,7 @@
-"""
-Régression Ridge pour l'encodage cérébral THINGS memory.
-Entraîne une Ridge (grille d'alphas balayée manuellement) par couche et évalue la prédiction.
+"""Régression Ridge pour l'encodage cérébral THINGS memory.
+
+Entraîne une Ridge (grille d'alphas balayée manuellement) par couche et
+évalue la prédiction via trois variantes de validation croisée imbriquée.
 """
 from dataclasses import dataclass
 import gc
@@ -30,6 +31,13 @@ from TribeHDF5Normalization import TribeHDF5Normalization
 # Ignore spécifiquement les avertissements de matrices mal conditionnées
 warnings.filterwarnings(action='ignore', category=LinAlgWarning)
 
+# Idem pour les débordements numpy (divide/overflow/invalid) rencontrés lors des
+# fits Ridge avec les plus grands alphas de la grille (jusqu'à 1e10) : ils produisent
+# potentiellement des coefficients NaN/Inf pour CES alphas précis, mais n'empêchent
+# pas la sélection de l'alpha optimal (leur R² correspondant devient alors très
+# négatif ou NaN, donc jamais retenu par argmax).
+np.seterr(divide='ignore', over='ignore', invalid='ignore')
+
 matplotlib.use('Agg')
 
 DPI_FIGURES = 300
@@ -56,6 +64,19 @@ FOLDS_VALIDATION_ONE_CYCLE = (
     {"validation": (34, 35, 36), "buffer": (33,)},
 )
 
+# Groupes de ROIs voxelwise (noms exacts des datasets dans le fichier
+# "<subject>_space-T1w_desc-ROImasks_voxelAnnotations.h5", groupes retinotopy_ROIs / fLoc_ROIs)
+ROIS_RETINOTOPIQUES = ("V1", "V2", "V3", "V3a", "V3b", "hV4", "VO1", "VO2", "LO1", "LO2", "TO1", "TO2")
+ROIS_CATEGORIELLES = ("faceFFA", "faceOFA", "facepSTS", "bodyEBA", "scenePPA", "sceneOPA", "sceneMPA")
+
+# Réseaux Yeo-7 (noms exacts tels qu'ils apparaissent dans la colonne "name" du
+# fichier d'annotations de l'atlas cneuromod26, ex. "7Networks_LH_Vis_1") utilisés
+# pour restreindre l'analyse en précision parcelle.
+RESEAUX_PARCELLES_VISUEL = ("Vis",)
+RESEAUX_PARCELLES_VISUEL_DORSATTN = ("Vis", "DorsAttn")
+
+NOM_FICHIER_ANNOTATIONS_PARCELLES = "tpl-MNI152NLin2009cAsym_atlas-Schaefer2018TianS3NettekovenAsym_desc-1000Parcels7Networks50Subcort128Cereb_parcelAnnotations.tsv"
+
 @dataclass
 class CheminsProjet:
     """Regroupe tous les chemins de fichiers nécessaires pour un sujet donné."""
@@ -67,13 +88,27 @@ class CheminsProjet:
     chemin_atlas: Path
     chemin_ROImask: Path
     chemin_anatomie: Path = None
+    chemin_annotations_parcelles: Path = None
 
 
 class RidgeRegression:
     """Entraîne et évalue une régression Ridge pour prédire l'activité IRMf
     à partir des activations d'une couche du modèle TRIBE, par sujet."""
 
-    def __init__(self, plateforme, subject, layer,  flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, ROImask_flag, randomize_flag = False):
+    def __init__(self, plateforme, subject, layer, flag_delai_bold_brute, centrage_donne_temps, flag_precision_voxel, ROImask_flag, randomize_flag=False):
+        """Initialise la configuration d'un sujet (chemins, options de prétraitement).
+
+        Args :
+            plateforme : "Rorqual" (cluster) ou toute autre valeur (poste local/Mac).
+            subject : identifiant du sujet, ex. "sub-03".
+            layer : nom de la couche TRIBE dont on utilise les activations.
+            flag_delai_bold_brute : voir `TribeHDF5Normalization`.
+            centrage_donne_temps : voir `TribeHDF5Normalization`.
+            flag_precision_voxel : True = timeseries voxelwise, False = parcelles.
+            ROImask_flag : non utilisé pour l'instant (réservé).
+            randomize_flag : si True, permute aléatoirement l'ordre des runs de Y
+                (baseline de randomisation).
+        """
         self.plateforme = plateforme
         self.subject = subject
         self.layer = layer
@@ -86,7 +121,14 @@ class RidgeRegression:
 
     def get_path_file_by_plateform(self, plateforme):
         """Construit les chemins de fichiers du sujet selon la plateforme
-        (cluster Rorqual ou poste local) et le niveau de précision (voxel/parcelle)."""
+        (cluster Rorqual ou poste local) et le niveau de précision (voxel/parcelle).
+
+        Args :
+            plateforme : "Rorqual" (cluster) ou toute autre valeur (poste local/Mac).
+
+        Returns :
+            CheminsProjet : tous les chemins nécessaires pour ce sujet.
+        """
         if plateforme == "Rorqual":
             ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
             ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
@@ -96,6 +138,8 @@ class RidgeRegression:
 
         chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
         chemin_ROImask = ROOT_ENCODING / "data" / "brain_map_subj" / f"{self.subject}_space-T1w_desc-ROImasks_voxelAnnotations.h5"
+
+        chemin_annotations_parcelles = ROOT_ENCODING / "data" / "brain_map_subj" / NOM_FICHIER_ANNOTATIONS_PARCELLES
 
         if self.flag_precision_voxel:
             sous_dossier = ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject
@@ -108,11 +152,20 @@ class RidgeRegression:
             chemin_atlas = sous_dossier / f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
             chemin_anatomie = None
 
-        return CheminsProjet(ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas, chemin_ROImask, chemin_anatomie)
+        return CheminsProjet(ROOT_ENCODING, ROOT_TIMESERIES, chemin_tribe, chemin_cneuromod, chemin_atlas, chemin_ROImask, chemin_anatomie, chemin_annotations_parcelles)
 
-    def discover_runs(self,tribe_hdf5=None):
-        """Liste les runs disponibles dans le fichier HF5 contenant les embeddings TRIBE et fait correspondre
-        chacun à sa session/run CNeuroMod et à sa vidéo source."""
+    def discover_runs(self, tribe_hdf5=None):
+        """Liste les runs disponibles dans le fichier HDF5 TRIBE et fait correspondre
+        chacun à sa session/run CNeuroMod et à sa vidéo source.
+
+        Args :
+            tribe_hdf5 : fichier HDF5 TRIBE déjà ouvert (évite de le rouvrir si
+                l'appelant en a déjà un). Si None, ouvert et fermé ici.
+
+        Returns :
+            list[tuple] : un tuple (tribe_ses, tribe_run, chemin_video, cneuromod_ses,
+                cneuromod_dataset) par run trouvé.
+        """
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
         if not chemins.chemin_tribe.exists():
@@ -155,20 +208,20 @@ class RidgeRegression:
         """Construit les matrices X (activations) et Y (signal IRMf) en alignant
         temporellement chaque run, puis les concatène sur l'ensemble des runs.
 
-        Returns:
-            tuple: (runs_ok, X, Y, groupes, TSNR)
-                - runs_ok : liste des runs traités avec succès.
-                - X, Y : matrices concaténées.
-                - groupes : identifiant de session pour chaque échantillon.
-                - TSNR : rapport signal/bruit temporel par voxel/parcelle.
+        Returns :
+            tuple : (runs_ok, X, Y, groupes, TSNR)
+                - runs_ok (list[str]) : runs traités avec succès ("ses-XXX/run-Y").
+                - X, Y (np.ndarray) : activations et signal IRMf concaténés.
+                - groupes (np.ndarray) : numéro de session pour chaque échantillon.
+                - TSNR (np.ndarray) : rapport signal/bruit temporel par voxel/parcelle.
         """
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
-        # Alignement temporel et concaténation
         X_list, Y_list = [], []
         runs_ok = []
         groupes_list = []
 
+        print(f"Traitement des runs pour {self.subject} (TRIBE layer={self.layer})...")
         with h5py.File(chemins.chemin_tribe, "r") as tribe_hdf5, \
                 h5py.File(chemins.chemin_cneuromod, "r") as cneuromod_hdf5:
 
@@ -187,7 +240,7 @@ class RidgeRegression:
                 if cneuromod_ses not in cneuromod_hdf5 or cneuromod_dataset not in cneuromod_hdf5[cneuromod_ses]:
                     print(f"CNeuroMod : Données IRMf absentes pour {cneuromod_ses} / {cneuromod_dataset}. Run ignoré.")
                     continue
-
+                
                 normalisateur = TribeHDF5Normalization(
                     chemin_tribe=chemins.chemin_tribe,
                     chemin_cneuromod=chemins.chemin_cneuromod,
@@ -225,7 +278,7 @@ class RidgeRegression:
                         break
 
                 Y_list = [Y_list[i] for i in nouvel_ordre]
-                print(f"⚠ Baseline activée : Y_list réordonné aléatoirement ({nombre_de_runs} runs, aucun n'a gardé sa position d'origine)")
+                print(f"Baseline activée : Y_list réordonné aléatoirement ({nombre_de_runs} runs, aucun n'a gardé sa position d'origine)")
 
             X = np.concatenate(X_list, axis=0)
             Y = np.concatenate(Y_list, axis=0)
@@ -247,49 +300,132 @@ class RidgeRegression:
 
             return runs_ok, X, Y, groupes, TSNR
 
-    def _selection_X_Y(self, sessions_a_exclure=None):
-        """Construit X, Y et exclut, si demandé, les sessions données."""
+    def _selection_X_Y(self, sessions_a_exclure=None, masque_roi=None):
+        """Construit X, Y, et applique les filtres optionnels (sessions, ROI).
+
+        Args :
+            sessions_a_exclure : numéros de session à retirer de X/Y/groupes.
+            masque_roi : vecteur booléen par voxel ; si fourni, restreint Y et TSNR
+                aux seuls voxels sélectionnés.
+
+        Returns :
+            tuple : (X, Y, groupes, TSNR), filtrés selon les arguments ci-dessus.
+        """
         runs_ok, X, Y, groupes, TSNR = self.create_X_Y_total()
         if sessions_a_exclure is not None:
             masque = ~np.isin(groupes, sessions_a_exclure)
             X, Y, groupes = X[masque], Y[masque], groupes[masque]
+        if masque_roi is not None:
+            Y = Y[:, masque_roi]
+            TSNR = TSNR[masque_roi]
         return X, Y, groupes, TSNR
 
-    def nested_cross_validation_full_manuel(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
-        """Validation croisée imbriquée 100% manuelle, jumeau de `nested_cross_validation_ridgecv_loo`.
+    def _charger_masque_roi(self, noms_rois):
+        """Charge le masque booléen (union) des voxels appartenant à une ou plusieurs
+        ROIs, depuis le fichier ROImask du sujet (précision voxel uniquement). La
+        recherche parcourt tous les groupes du fichier (retinotopy_ROIs, fLoc_ROIs,
+        yeo_ROIs...).
 
-        Même split externe par session (GroupShuffleSplitSession) et même principe
-        (un alpha optimal par voxel/parcelle), mais la sélection d'alpha en boucle
-        interne est faite à la main : `LeaveOneGroupOut` (une session isolée à la
-        fois) + refit d'un `Ridge` pour chaque alpha de la grille, sur chaque fold
-        interne.
+        Args :
+            noms_rois : noms de ROIs à combiner (ex. ROIS_RETINOTOPIQUES).
 
-        Agrégation du critère de sélection, calquée sur le mécanisme réel de
-        `RidgeCV(cv=None)` (vérifié dans le code source de `_RidgeGCV.fit()`,
-        classe interne de scikit-learn) : scikit-learn ne moyenne PAS des R²
-        calculés séparément par fold. Il construit un seul vecteur `predictions`
-        recouvrant TOUS les échantillons d'entraînement (une prédiction "laissé de
-        côté" par échantillon), puis appelle le scorer UNE SEULE FOIS sur ce
-        vecteur complet pour obtenir un R² poolé par alpha. On reproduit ici
-        exactement la même logique, en gardant le LOGO (session entière isolée)
-        au lieu du LOO (un seul timepoint) : les résidus au carré de chaque fold
-        interne sont accumulés (`ssr_cumul_par_alpha`), puis le R² poolé est
-        calculé une seule fois après la boucle interne, comme le ferait
-        `_RidgeGCV`. (Équivalent mathématiquement à stocker toutes les
-        prédictions et appeler `r2_score` une fois dessus, comme sklearn, mais
-        sans le coût mémoire prohibitif à l'échelle voxel.)
+        Returns :
+            np.ndarray : masque booléen, une entrée par voxel (True = dans une des
+                ROIs demandées).
 
-        Attention : coûteux. Pour n_folds folds externes × n sessions internes ×
-        len(grille_alphas) alphas, ça fait n_folds × n × len(grille_alphas) refits
-        de `Ridge()` (~5000 fits pour une config typique 10×25×20), chacun
-        recalculant une décomposition depuis zéro. C'est l'unique raison d'être
-        de `nested_cross_validation_ridgecv_loo` : remplacer ce triple `for` par
-        `RidgeCV(cv=None)`, qui calcule l'équivalent analytiquement en un seul
-        fit — mais uniquement disponible en Leave-One-Out (par timepoint), pas en
-        Leave-One-Group-Out (par session), d'où la seule différence algorithmique
-        entre les deux jumeaux.
+        Raises :
+            ValueError : si une ROI demandée est absente du fichier.
         """
-        X, Y, groupes, TSNR = self._selection_X_Y()
+        chemins = self.get_path_file_by_plateform(self.plateforme)
+
+        masque = None
+        rois_trouvees = {}
+        with h5py.File(chemins.chemin_ROImask, 'r') as fichier:
+            for groupe in fichier.keys():
+                for nom_roi in fichier[groupe].keys():
+                    if nom_roi in noms_rois:
+                        vecteur = fichier[groupe][nom_roi][:].astype(bool)
+                        masque = vecteur.copy() if masque is None else (masque | vecteur)
+                        rois_trouvees[nom_roi] = int(vecteur.sum())
+
+        rois_manquantes = set(noms_rois) - set(rois_trouvees)
+        if rois_manquantes:
+            raise ValueError(f"ROIs introuvables dans {chemins.chemin_ROImask.name} : {sorted(rois_manquantes)}")
+
+        print(f"Masque ROI ({len(noms_rois)} ROIs) : {int(masque.sum())} voxels au total — détail : {rois_trouvees}")
+        return masque
+
+    def _charger_masque_parcelles(self, reseaux):
+        """Charge le masque booléen des parcelles appartenant à un ou plusieurs
+        réseaux Yeo-7 (précision parcelle uniquement), depuis le fichier
+        d'annotations partagé de l'atlas cneuromod26 (`NOM_FICHIER_ANNOTATIONS_PARCELLES`,
+        colonne "name", ex. "7Networks_LH_Vis_1" pour le réseau "Vis"). L'ordre des
+        lignes du fichier (colonne "index", 1..1134) correspond à l'ordre des
+        colonnes des timeseries parcellaires.
+
+        Args :
+            reseaux : noms de réseaux à combiner (ex. RESEAUX_PARCELLES_VISUEL_DORSATTN).
+
+        Returns :
+            np.ndarray : masque booléen, une entrée par parcelle (True = dans un des
+                réseaux demandés).
+        """
+        chemins = self.get_path_file_by_plateform(self.plateforme)
+        annotations = pd.read_csv(chemins.chemin_annotations_parcelles, sep="\t")
+
+        pattern = "|".join(f"_{reseau}_" for reseau in reseaux)
+        masque = annotations["name"].str.contains(pattern, regex=True).to_numpy()
+
+        print(f"Masque parcelles ({', '.join(reseaux)}) : {int(masque.sum())} parcelles au total.")
+        return masque
+
+    def _etendre_valeurs_masque(self, valeurs, masque_roi, valeur_remplissage=0.0):
+        """Replace des valeurs calculées sur un sous-ensemble de voxels (ROI) dans un
+        vecteur de la taille du cerveau entier, pour l'affichage sur une carte cérébrale.
+
+        Args :
+            valeurs : valeurs calculées sur les voxels de la ROI (longueur = nombre
+                de voxels True dans `masque_roi`).
+            masque_roi : vecteur booléen par voxel, ou None (cerveau entier).
+            valeur_remplissage : valeur donnée aux voxels hors ROI.
+
+        Returns :
+            np.ndarray : `valeurs` telles quelles si `masque_roi` est None, sinon un
+                vecteur de la taille du cerveau entier.
+        """
+        if masque_roi is None:
+            return valeurs
+        pleines = np.full(masque_roi.shape[0], valeur_remplissage, dtype=np.float64)
+        pleines[masque_roi] = valeurs
+        return pleines
+
+    def nested_cross_validation_full_manuel(self, grille_alphas, n_folds=5, test_size=0.2, seed=None, masque_roi=None):
+        """Validation croisée imbriquée 100% manuelle : sélection d'alpha par voxel/
+        parcelle via `LeaveOneGroupOut` (une session isolée à la fois) et refit
+        explicite d'un `Ridge` pour chaque alpha de la grille sur chaque fold interne.
+
+        Args :
+            grille_alphas : valeurs d'alpha à tester.
+            n_folds : nombre de folds externes (GroupShuffleSplitSession).
+            test_size : proportion de sessions dans le test externe de chaque fold.
+            seed : graine du split externe.
+            masque_roi : vecteur booléen par voxel (cf. `_charger_masque_roi`) pour
+                restreindre l'analyse à une ROI ; None = cerveau entier.
+
+        Returns :
+            tuple : (r2_moyen, r2_variance_inter_folds, r2_tous_les_tests,
+                alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner,
+                TSNR).
+
+        Notes :
+            - Jumeau de `nested_cross_validation_ridgecv_loo` : même split externe et
+              même principe (un alpha par voxel), mais boucle interne manuelle (LOGO)
+              plutôt que LOO analytique 
+            - La sélection d'alpha utilise un R² poolé (résidus accumulés sur tous les
+              folds internes puis un seul calcul de R², jamais une moyenne de R² par
+              fold), pour reproduire exactement le mécanisme de `RidgeCV(cv=None)`.
+        """
+        X, Y, groupes, TSNR = self._selection_X_Y(masque_roi=masque_roi)
         n_features = Y.shape[1]
 
         # 1. Définition du splitter externe
@@ -309,10 +445,8 @@ class RidgeRegression:
             inner_cv = LeaveOneGroupOut()
             inner_splits = list(inner_cv.split(X_train, Y_train, groups=groupes_train))
 
-            # Comme _RidgeGCV : le dénominateur du R² poolé (SST) ne dépend que des
-            # vraies valeurs, pas de l'alpha ni du fold interne -> calculé une seule
-            # fois ici, sur TOUT Y_train (puisque le LOGO partitionne Y_train sans
-            # recouvrement, l'union des validations internes = Y_train en entier).
+            # SST du R² poolé : indépendant de l'alpha/fold, calculé une seule fois sur
+            # tout Y_train (le LOGO partitionne sans recouvrement).
             Y_train_moyenne = Y_train.mean(axis=0)
             sst_total = np.sum((Y_train - Y_train_moyenne) ** 2, axis=0)
 
@@ -330,42 +464,28 @@ class RidgeRegression:
                 scaler_Y_inner = StandardScaler()
                 Y_inner_train_scaled = scaler_Y_inner.fit_transform(Y_train[inner_train_idx])
 
-                # Vérité terrain de ce fold interne, en unités BRUTES (pas standardisées) :
-                # nécessaire pour pouvoir accumuler des résidus cohérents entre folds,
-                # puisque chaque fold a son propre scaler_Y_inner (fit sur des données
-                # différentes à chaque fois).
+                # Unités brutes, requis pour accumuler des résidus cohérents entre folds
+                # (chaque fold a son propre scaler_Y_inner).
                 Y_inner_val_brut = Y_train[inner_val_idx]
 
-                # Tableau pour stocker les R² de CE fold interne (diagnostic uniquement)
+                # R² de CE fold interne uniquement : diagnostic, ne sert pas à choisir l'alpha final.
                 r2_par_alpha_ce_fold = np.zeros((len(grille_alphas), n_features))
 
-                # On teste chaque alpha de la grille explicitement
                 for a_idx, alpha in enumerate(grille_alphas):
-                    # Un seul modèle Ridge pour tout le cerveau
                     ridge_inner = Ridge(alpha=alpha)
                     ridge_inner.fit(X_inner_train_scaled, Y_inner_train_scaled)
                     Y_inner_pred_scaled = ridge_inner.predict(X_inner_val_scaled)
-
-                    # Retour en unités brutes pour pouvoir accumuler across folds
                     Y_inner_pred_brut = scaler_Y_inner.inverse_transform(Y_inner_pred_scaled)
 
-                    # Accumulation du numérateur (SSR) du R² poolé, comme _RidgeGCV
-                    # accumule implicitement toutes les prédictions LOO avant de
-                    # n'appeler le scorer qu'une seule fois.
+                    # Numérateur (SSR) du R² poolé, accumulé across folds.
                     ssr_cumul_par_alpha[a_idx, :] += np.sum((Y_inner_val_brut - Y_inner_pred_brut) ** 2, axis=0)
-
-                    # Diagnostic uniquement : R² de CE fold interne, pour la figure
-                    # "alphas internes" (best_alphas_inner) -- ne sert plus a choisir
-                    # l'alpha final, seulement a visualiser la variabilite inter-sessions.
                     r2_par_alpha_ce_fold[a_idx, :] = r2_score(Y_inner_val_brut, Y_inner_pred_brut, multioutput='raw_values')
 
                 best_indices_fold = np.argmax(r2_par_alpha_ce_fold, axis=0)
                 best_alphas_inner_toutes_folds.append(grille_alphas[best_indices_fold])
 
-            # Sélection finale : R² poolé sur TOUTES les prédictions internes réunies
-            # (calculé une seule fois, comme le fait _RidgeGCV._score), puis argmax
-            # par voxel sur cette courbe poolée -- plus stable qu'une moyenne de R²
-            # calculés séparément sur chaque petit fold interne.
+            # R² poolé sur toutes les prédictions internes réunies (plus stable qu'une
+            # moyenne de R² calculés séparément par petit fold interne).
             r2_par_alpha_poole = 1 - (ssr_cumul_par_alpha / sst_total)
             best_indices = np.argmax(r2_par_alpha_poole, axis=0)
             alpha_optimal = grille_alphas[best_indices]
@@ -382,21 +502,16 @@ class RidgeRegression:
 
             ridge_final = Ridge(alpha=alpha_optimal)
             ridge_final.fit(X_train_scaled, Y_train_scaled)
-
-            # Évaluation sur le test set
             Y_pred_scaled = ridge_final.predict(X_test_scaled)
 
-            # Calcul du score R2
             r2_score_fold = r2_score(Y_test_scaled, Y_pred_scaled, multioutput='raw_values')
             r2_tous_les_tests[i, :] = r2_score_fold
             print(f"-> R2 mean : {np.mean(r2_score_fold)}")
             print(f"-> R2 max : {np.max(r2_score_fold)}")
 
-            # Nettoyage mémoire
             del ridge_final, Y_pred_scaled
             gc.collect()
 
-        # 3. Calcul des métriques finales
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
@@ -404,24 +519,33 @@ class RidgeRegression:
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, TSNR
 
-    def nested_cross_validation_ridgecv_loo(self, grille_alphas, n_folds=5, test_size=0.2, seed=None):
-        """Jumeau sklearn-natif de `nested_cross_validation_full_manuel`.
+    def nested_cross_validation_ridgecv_loo(self, grille_alphas, n_folds=5, test_size=0.2, seed=None, masque_roi=None):
+        """Jumeau sklearn-natif de `nested_cross_validation_full_manuel` : remplace la
+        boucle interne manuelle (LeaveOneGroupOut + refit d'un Ridge par alpha) par
+        `RidgeCV(cv=None)`, qui sélectionne l'alpha via un Leave-One-Out calculé
+        analytiquement (aucun refit par échantillon ni par alpha) et qui fonctionne par TR.
 
-        Même split externe par session (GroupShuffleSplitSession) et même principe
-        (un alpha optimal par voxel/parcelle), mais la boucle interne manuelle
-        (LeaveOneGroupOut + refit d'un Ridge pour chaque alpha de la grille) est
-        remplacée par RidgeCV(cv=None), qui sélectionne l'alpha via un Leave-One-Out
-        efficace calculé analytiquement (pas de refit par échantillon ni par alpha).
-        C'est l'unique différence algorithmique avec la version manuelle : LOO
-        (par timepoint) au lieu de LOGO (par session).
+        Args :
+            grille_alphas : valeurs d'alpha à tester.
+            n_folds : nombre de folds externes (GroupShuffleSplitSession).
+            test_size : proportion de sessions dans le test externe de chaque fold.
+            seed : graine du split externe.
+            masque_roi : vecteur booléen par voxel (cf. `_charger_masque_roi`) pour
+                restreindre l'analyse à une ROI ; None = cerveau entier.
 
-        Attention (voir évaluation) : le LOO ignore la structure de session/
-        autocorrélation temporelle que LOGO respectait explicitement pour la
-        sélection d'alpha — les alphas et R² obtenus ne sont donc pas strictement
-        comparables scientifiquement à ceux de `nested_cross_validation_full_manuel`, seulement
-        comparables en termes de mécanique/temps de calcul.
+        Returns :
+            tuple : (r2_moyen, r2_variance_inter_folds, r2_tous_les_tests,
+                alphas_tous_externes, alphas_tous_externes_moyen, TSNR).
+
+        Notes :
+            LOO (par timepoint) au lieu de LOGO (par session) est la seule différence
+            algorithmique avec `nested_cross_validation_full_manuel`. Le LOO ignore la
+            structure de session/autocorrélation temporelle que LOGO respectait pour
+            la sélection d'alpha : les alphas et R² obtenus ne sont donc pas
+            strictement comparables scientifiquement entre les deux méthodes,
+            seulement en termes de mécanique/temps de calcul.
         """
-        X, Y, groupes, TSNR = self._selection_X_Y()
+        X, Y, groupes, TSNR = self._selection_X_Y(masque_roi=masque_roi)
         n_features = Y.shape[1]
 
         outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
@@ -435,12 +559,8 @@ class RidgeRegression:
             X_train, Y_train = X[train_idx], Y[train_idx]
             X_test, Y_test = X[test_idx], Y[test_idx]
 
-            # StandardScaler() sur X : fit sur train, transform sur test (Pipeline = 0 fuite).
-            # RidgeCV(cv=None) : Leave-One-Out natif et efficace (raccourci algébrique,
-            # cf. sklearn.linear_model.RidgeCV). alpha_per_target=True : un alpha par
-            # voxel, uniquement compatible avec cv=None (LOO).
-            # TransformedTargetRegressor : standardise Y_train, entraîne dessus, et
-            # dé-standardise automatiquement les prédictions à l'inverse_transform.
+            # alpha_per_target=True : un alpha par voxel, uniquement compatible avec cv=None (LOO).
+            # TransformedTargetRegressor standardise/dé-standardise Y automatiquement.
             modele = TransformedTargetRegressor(
                 regressor=make_pipeline(
                     StandardScaler(),
@@ -471,16 +591,21 @@ class RidgeRegression:
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
     def _generer_folds_one_cycle(self):
-        """Construit les folds Train/Validation/Test/Buffer du protocole 'one cycle'.
+        """Construit les folds Train/Validation/Test/Buffer du protocole 'one cycle'
+        (sessions numérotées 1..36).
 
-        Règles (sessions numérotées 1..36) :
-        - Test FIXE, identique pour tous les folds : {14, 15, 16}.
-        - Buffer autour du Test, toujours exclu (jamais Train ni Validation) : {13, 17}.
-        - Validation et buffer associé : donnés explicitement par `FOLDS_VALIDATION_ONE_CYCLE`
-          (8 blocs, bornes et buffers exacts du protocole — pas dérivés d'une règle
-          générique de tuilage).
-        - Train : tout le reste (ni Test, ni buffer Test, ni Validation, ni buffer
-          Validation, pour ce fold).
+        Returns :
+            list[dict] : un dict par fold, clés "train"/"validation"/"test"/"buffer"
+                (listes de numéros de session).
+
+        Notes :
+            - Test FIXE, identique pour tous les folds : {14, 15, 16}.
+            - Buffer autour du Test, toujours exclu (jamais Train ni Validation) : {13, 17}.
+            - Validation et son buffer : donnés explicitement par `FOLDS_VALIDATION_ONE_CYCLE`
+              (8 blocs, bornes et buffers exacts du protocole — pas dérivés d'une règle
+              générique de tuilage).
+            - Train : tout le reste (ni Test, ni buffer Test, ni Validation, ni buffer
+              Validation, pour ce fold).
         """
         sessions_test = set(SESSIONS_TEST_ONE_CYCLE)
         buffer_test = set(BUFFER_TEST_ONE_CYCLE)
@@ -500,35 +625,31 @@ class RidgeRegression:
             })
         return folds
 
-    def nested_cross_validation_one_cycle(self, grille_alphas):
-        """Validation croisée par blocs de sessions ('one cycle'), protocole type
-        CNeuroMod-THINGS.
+    def nested_cross_validation_one_cycle(self, grille_alphas, masque_roi=None):
+        """Validation croisée par blocs de sessions fixes : Le Test est fixe :
+        sessions 14-16, jamais utilisé pour choisir les alphas et identique pour tous les folds ; 
+        chaque fold ne comporte qu'un seul split Train / Validation pour sélectionner l'alpha
+        optimal par voxel/parcelles, puis le modèle final est réentraîné sur Train+Validation
+        et évalué une fois sur le Test fixe. Des sessions tampons ("buffer") isolent
+        Test et Validation de leurs voisines pour limiter la fuite par autocorrélation
+        temporelle inter-sessions. Voir `_generer_folds_one_cycle` pour le découpage.
 
-        Contrairement aux deux autres jumeaux (`nested_cross_validation_full_manuel`,
-        `nested_cross_validation_ridgecv_loo`), le split n'est pas aléatoire : le
-        Test est FIXE (sessions 14-16) et identique pour tous les folds, jamais
-        utilisé pour choisir l'alpha. Chaque fold ne comporte qu'UN SEUL split
-        Train → Validation (pas de sous-CV interne) pour sélectionner l'alpha optimal
-        par voxel ; le modèle final est ensuite réentraîné sur Train+Validation et
-        évalué une fois sur le Test fixe. Des sessions tampons ("buffer") isolent le
-        Test et chaque bloc de Validation de leurs voisines immédiates pour limiter
-        la fuite due à l'autocorrélation temporelle inter-sessions.
+        Args :
+            grille_alphas : valeurs d'alpha à tester.
+            masque_roi : vecteur booléen par voxel (cf. `_charger_masque_roi`) pour
+                restreindre l'analyse à une ROI ; None = cerveau entier.
 
-        Contrairement à `nested_cross_validation_full_manuel`, il n'y a ici qu'UN
-        SEUL bloc de Validation par fold (pas plusieurs folds internes à agréger) :
-        le problème de "moyenne de R² bruités par petit fold" qui affectait
-        `full_manuel` ne se pose donc pas ici. Par cohérence avec le mécanisme
-        réel de `_RidgeGCV._score()` (qui score toujours sur `unscaled_y`, la
-        cible en unités brutes, jamais sur la version centrée/standardisée utilisée
-        pour le fit), le R² de sélection est calculé ici aussi en unités brutes
-        (prédictions dé-standardisées via `scaler_Y_selection.inverse_transform`)
-        plutôt que dans l'espace standardisé — sans effet numérique sur l'alpha
-        choisi (le R² est invariant à une transformation affine), mais pour rester
-        cohérent avec les deux autres jumeaux.
+        Returns :
+            tuple : (r2_moyen, r2_variance_inter_folds, r2_tous_les_tests,
+                alphas_tous_externes, alphas_tous_externes_moyen, TSNR).
 
-        Voir `_generer_folds_one_cycle` pour le détail du découpage.
+        Notes :
+            Un seul bloc de Validation par fold (pas plusieurs folds internes à
+            agréger) : le R² de sélection est calculé en unités brutes (prédictions
+            dé-standardisées), par cohérence avec les deux autres jumeaux, même si
+            le R² est en réalité invariant à une transformation affine.
         """
-        X, Y, groupes, TSNR = self._selection_X_Y()
+        X, Y, groupes, TSNR = self._selection_X_Y(masque_roi=masque_roi)
         n_features = Y.shape[1]
 
         folds = self._generer_folds_one_cycle()
@@ -610,17 +731,19 @@ class RidgeRegression:
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
-    def afficher_X_Y_LeaveOneOut(self):
-        X, Y, _, _ = self._selection_X_Y()
-        loo = LeaveOneOut()
-        for i, (train_index, test_index) in enumerate(loo.split(X)):
-            print(f"Fold {i}:")
-            print(f"  Train: index={train_index}")
-            print(f"  Test:  index={test_index}")
-
-
     def _sauvegarder_figure(self, figure_sauvegardable, nom_fichier, message, **kwargs_savefig):
-        """Sauvegarde une figure (matplotlib Figure ou display Nilearn) dans output/ et affiche un message."""
+        """Sauvegarde une figure (matplotlib Figure ou display Nilearn) dans output/.
+
+        Args :
+            figure_sauvegardable : objet exposant `.savefig()` (Figure matplotlib ou
+                display Nilearn).
+            nom_fichier : nom du fichier de sortie (dans output/).
+            message : préfixe du message affiché une fois la sauvegarde faite.
+            **kwargs_savefig : arguments transmis à `.savefig()`.
+
+        Returns :
+            Path : chemin complet du fichier sauvegardé.
+        """
         chemins = self.get_path_file_by_plateform(self.plateforme)
         chemin_sortie = chemins.root_encoding / "output" / nom_fichier
         figure_sauvegardable.savefig(chemin_sortie, dpi=DPI_FIGURES, **kwargs_savefig)
@@ -628,7 +751,12 @@ class RidgeRegression:
         return chemin_sortie
 
     def print_scores(self, scores_finaux, noms_parcelles=None):
-        """Affiche un résumé (moyenne, médiane, max, part de R² positifs) des scores R²."""
+        """Affiche un résumé (moyenne, médiane, max, part de R² positifs) des scores R².
+
+        Args :
+            scores_finaux : R² par voxel/parcelle.
+            noms_parcelles : noms à afficher pour le voxel/parcelle max (sinon son index).
+        """
         unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
         index_max = np.argmax(scores_finaux)
         label_max = index_max if noms_parcelles is None else noms_parcelles[index_max]
@@ -642,16 +770,25 @@ class RidgeRegression:
         print(f"=========================================")
 
     def plot_r2_distribution(self, r2_tous_les_tests, suffix=""):
-        r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels,)
+        """Trace la distribution du R² moyen (inter-folds) par voxel/parcelle et
+        l'enregistre en PNG.
+
+        Args :
+            r2_tous_les_tests : R² par fold externe et par voxel/parcelle, shape
+                (n_folds, n_features).
+            suffix : suffixe ajouté au nom du fichier de sortie.
+
+        Returns :
+            Path : chemin du fichier PNG sauvegardé.
+        """
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         mediane = np.median(r2_moyen)
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
 
-        # DataFrame pour la moyenne inter-folds
         df_moyen = pd.DataFrame({"r2": r2_moyen})
 
         fig, ax = plt.subplots(figsize=(10, 5))
 
-        # Distribution moyenne inter-folds (au premier plan)
         sns.histplot(
             data=df_moyen, x="r2",
             bins=100, element="step", fill=False,
@@ -674,11 +811,21 @@ class RidgeRegression:
         return chemin_sauvegarde
 
     def plot_ROImask_histogram(self, scores_finaux):
-        """Trace un boxplot des R² par ROI (voxelwise uniquement) et l'enregistre en HTML."""
+        """Trace un barplot du R² moyen par ROI (voxelwise uniquement) et l'enregistre
+        en PNG.
+
+        Args :
+            scores_finaux : R² moyen par voxel (cerveau entier, même longueur que les
+                masques du fichier ROImask).
+
+        Returns :
+            Path | None : chemin du PNG sauvegardé, ou None si `flag_precision_voxel`
+                est False (analyse indisponible en précision parcelle).
+        """
         chemins = self.get_path_file_by_plateform(self.plateforme)
         fichier_ROImask = chemins.chemin_ROImask
 
-        # Mapping ROI → famille de couleur
+        # Chaque ROI est rattachée à une famille, colorée via `palette` ci-dessous.
         familles = {
             "V1": "early", "V2": "early", "V3": "early",
             "hv4": "ventral", "V3a": "ventral", "V3b": "ventral",
@@ -732,38 +879,37 @@ class RidgeRegression:
             return None
 
     def plot_r2_threshold(self, r2_tous_les_tests, suffix=""):
-        r2_moyen = np.mean(r2_tous_les_tests, axis=0)  # (n_voxels,)
+        """Trace la fraction de voxels/parcelles dont le R² moyen dépasse un seuil,
+        pour une grille de seuils entre 0 et le R² max, et l'enregistre en PNG.
+
+        Args :
+            r2_tous_les_tests : R² par fold externe et par voxel/parcelle, shape
+                (n_folds, n_features).
+            suffix : suffixe ajouté au nom du fichier de sortie.
+
+        Returns :
+            Path : chemin du fichier PNG sauvegardé.
+        """
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
 
-        # On démarre à 0 (comme sur l'image) jusqu'au R2 maximum
         max_r2 = r2_moyen.max() if r2_moyen.max() > 0 else 0.3
         seuils = np.linspace(0.0, max_r2, 300)
         fractions = [np.mean(r2_moyen >= seuil) for seuil in seuils]
 
         fig, ax = plt.subplots(figsize=(8, 6))
-
-        # Ajout de la grille légère en arrière-plan
         ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
         ax.set_axisbelow(True)
 
-        # Tracé de la courbe
         ax.plot(seuils, fractions, linewidth=2.5, color="#0072B2", label=self.subject)
-
-        # Lignes verticales de repère (transparentes et pointillées)
         ax.axvline(0.05, color="grey", linestyle="--", linewidth=1, alpha=0.5)
         ax.axvline(0.10, color="grey", linestyle="--", linewidth=1, alpha=0.5)
 
-        # Nettoyage de l'esthétique (retrait des bordures haut et droite)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-
         ax.set_xlabel("R² threshold", fontsize=12)
         ax.set_ylabel(f"fraction of {unite} ≥ threshold", fontsize=12)
-
-        # Titre centré et en gras
         ax.set_title(f"How many {unite} are well predicted", fontsize=14, fontweight='bold')
-
-        # Légende (en haut à droite, sans cadre)
         ax.legend(frameon=False, loc="upper right")
 
         plt.tight_layout()
@@ -774,14 +920,23 @@ class RidgeRegression:
         return chemin_sauvegarde
 
     def plot_accuracy(self, r2_tous_les_tests, suffix=""):
-        """Barres mean/median/top-10% pour UN sujet (pas d'agrégation multi-sujets :
-        un seul appel = un seul sujet, une seule figure)."""
+        """Trace les barres mean/median/top-10% (moyenne ± écart-type inter-folds)
+        pour UN sujet et les enregistre en PNG. Pas d'agrégation multi-sujets : un
+        seul appel = un seul sujet, une seule figure.
+
+        Args :
+            r2_tous_les_tests : R² par fold externe et par voxel/parcelle, shape
+                (n_folds, n_features).
+            suffix : suffixe ajouté au nom du fichier de sortie.
+
+        Returns :
+            Path : chemin du fichier PNG sauvegardé.
+        """
         n_features = r2_tous_les_tests.shape[1]
         n_folds = r2_tous_les_tests.shape[0]
 
-        # Une valeur par fold externe pour que seaborn puisse tracer une barre d'erreur (écart-type inter-folds) :
-        # la variabilité entre folds externes est précisément ce que la nested CV permet
-        # d'estimer.
+        # Une valeur par fold externe (pas juste par métrique) : nécessaire pour que
+        # errorbar="sd" dans sns.barplot trace l'écart-type inter-folds.
         means_par_fold = np.mean(r2_tous_les_tests, axis=1)
         medians_par_fold = np.median(r2_tous_les_tests, axis=1)
         seuils_top10_par_fold = np.percentile(r2_tous_les_tests, 90, axis=1)
@@ -790,39 +945,28 @@ class RidgeRegression:
             for fold, seuil in zip(r2_tous_les_tests, seuils_top10_par_fold)
         ])
 
-        # Format long (une ligne par fold externe × métrique) : errorbar="sd" dans
-        # sns.barplot calcule alors automatiquement moyenne + écart-type inter-folds.
         df = pd.DataFrame({
             "Métrique": ["mean"] * n_folds + ["median"] * n_folds + ["top-10% mean"] * n_folds,
             "R2": np.concatenate([means_par_fold, medians_par_fold, top10_par_fold]),
         })
 
         fig, ax = plt.subplots(figsize=(6, 6))
-
-        # Ajout de la grille légère en arrière-plan (comme sur l'image)
         ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
-        ax.set_axisbelow(True)  # S'assure que la grille reste derrière les barres
+        ax.set_axisbelow(True)
 
-        # Couleurs fidèles à votre image de référence
         palette = {"mean": "#0072B2", "median": "#56B4E9", "top-10% mean": "#E69F00"}
-
         sns.barplot(
             data=df, x="Métrique", y="R2", hue="Métrique",
             palette=palette, ax=ax, errorbar="sd", capsize=0.1, legend=False,
         )
 
-        # Annotation automatique et propre des valeurs sur les barres
         for container in ax.containers:
             ax.bar_label(container, fmt='%.3f', padding=3, fontsize=10)
 
-        # Nettoyage de l'esthétique (retrait des bordures haut et droite)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-
         ax.set_xlabel("")
         ax.set_ylabel("R² (raw)", fontsize=12)
-
-        # Titre centré et en gras
         ax.set_title(f"Accuracy — {self.subject} / {self.layer} (n={n_features:,}, {n_folds} folds)", fontsize=14, fontweight='bold')
 
         plt.tight_layout()
@@ -836,15 +980,21 @@ class RidgeRegression:
     def plot_alphas_histogram(self, alphas_fold, grille_alphas, alphas_finaux=None, suffix=""):
         """Trace la distribution (log10) des alphas sélectionnés et l'enregistre en PNG.
 
-        Si `alphas_finaux` est fourni, affiche la distribution des alphas moyens
-        (une courbe). Sinon, affiche la distribution empilée par fold à partir
-        de `alphas_fold`.
+        Args :
+            alphas_fold : alphas par fold externe et par voxel/parcelle (ignoré si
+                `alphas_finaux` est fourni).
+            grille_alphas : grille complète d'alphas testés (fixe les bins/ticks).
+            alphas_finaux : si fourni, affiche la distribution des alphas moyens (une
+                courbe) plutôt que la distribution empilée par fold.
+            suffix : suffixe ajouté au nom du fichier de sortie.
+
+        Returns :
+            Path : chemin du fichier PNG sauvegardé.
         """
         log10_grille = np.log10(grille_alphas)
         step = log10_grille[1] - log10_grille[0]
         bins = np.append(log10_grille - step / 2, log10_grille[-1] + step / 2)
 
-        # Construction du DataFrame et paramètres spécifiques selon le cas
         if alphas_finaux is not None:
             log10_valeurs = np.log10(alphas_finaux)
             df = pd.DataFrame({"log10_alpha": log10_valeurs})
@@ -859,12 +1009,10 @@ class RidgeRegression:
             hue_params = {"hue": "fold", "multiple": "dodge", "palette": "tab20"}
             titre = "Distribution des alphas par fold"
 
-        # Limites et ticks communs
         xlim_min = log10_valeurs.min() - step / 2
         xlim_max = log10_valeurs.max() + step / 2
         ticks_visibles = log10_grille[(log10_grille >= xlim_min) & (log10_grille <= xlim_max)]
 
-        # Figure
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
         fig, ax = plt.subplots(figsize=(10, 5))
         sns.histplot(data=df, x="log10_alpha", bins=bins, shrink=0.8, ax=ax, **hue_params)
@@ -880,8 +1028,25 @@ class RidgeRegression:
         plt.close(fig)
         return chemin_sauvegarde
 
-    def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin = None, vmax = None, suffix=""):
-        """Projette un vecteur de scores (R², alphas, TSNR...) sur le cerveau et enregistre la carte statistique en PNG."""
+    def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin=None, vmax=None, suffix=""):
+        """Projette un vecteur de scores (R², alphas, TSNR...) sur le cerveau et
+        enregistre la carte statistique en PNG.
+
+        Args :
+            donnees : un score par voxel/parcelle (même longueur que le masque de
+                l'atlas du sujet).
+            nom_carte : nom affiché dans le titre et le nom de fichier (ex. "R2").
+            cmap : colormap matplotlib.
+            treshold : seuil d'affichage transmis à `plot_stat_map` (valeurs
+                masquées si |valeur affichée| <= treshold).
+            echelle_log : si True, affiche log10(donnees) (colorbar reformatée en
+                conséquence).
+            vmin, vmax : bornes de la colorbar (None = calculées par Nilearn).
+            suffix : suffixe ajouté au nom du fichier de sortie.
+
+        Returns :
+            Path : chemin du fichier PNG sauvegardé.
+        """
         chemins = self.get_path_file_by_plateform(self.plateforme)
 
         donnees_affichees = np.log10(donnees) if echelle_log else donnees
@@ -926,22 +1091,57 @@ class RidgeRegression:
         plt.close(fig)
         return chemin_sauvegarde
 
-    def brain_mapping_r2(self, scores_r2, noms_parcelles=None, suffix=""):
-        """Affiche le résumé des R² et enregistre la carte cérébrale correspondante."""
+    def brain_mapping_r2(self, scores_r2, noms_parcelles=None, suffix="", masque_roi=None):
+        """Affiche le résumé des R² (`print_scores`) et enregistre la carte cérébrale
+        correspondante.
+
+        Args :
+            scores_r2 : R² par voxel/parcelle. Si `masque_roi` est fourni, ne porte
+                que sur les voxels de la ROI (les stats de `print_scores` restent
+                alors calculées sur la ROI seule).
+            noms_parcelles : transmis à `print_scores` pour nommer le score max.
+            suffix : suffixe ajouté au nom du fichier de sortie.
+            masque_roi : vecteur booléen par voxel ; si fourni, la carte est projetée
+                sur le cerveau entier, les voxels hors ROI étant remplis à 0 (donc
+                masqués par `SEUIL_AFFICHAGE_BRAIN_MAP`).
+
+        Returns :
+            Path : chemin du fichier PNG sauvegardé.
+        """
         self.print_scores(scores_r2, noms_parcelles)
-        chemin_sauvegarde = self._brain_mapping_generique(scores_r2, nom_carte="R2", cmap="YlOrRd", treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin=0, vmax=np.max(scores_r2), suffix=suffix)
+        donnees_carte = self._etendre_valeurs_masque(scores_r2, masque_roi, valeur_remplissage=0.0)
+        chemin_sauvegarde = self._brain_mapping_generique(donnees_carte, nom_carte="R2", cmap="YlOrRd", treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin=0, vmax=np.max(scores_r2), suffix=suffix)
         return chemin_sauvegarde
 
-    def brain_mapping_alphas(self, alphas_tous_les_lots, suffix=""):
-        """Enregistre la carte cérébrale des alphas optimaux (échelle log10)."""
-        # treshold=0 : la donnée affichée est log10(alpha),
-        chemin_sauvegarde = self._brain_mapping_generique(alphas_tous_les_lots, nom_carte="Alphas", cmap="YlOrRd", treshold=0, echelle_log=True, suffix=suffix)
+    def brain_mapping_alphas(self, alphas_tous_les_lots, suffix="", masque_roi=None):
+        """Enregistre la carte cérébrale des alphas optimaux (échelle log10).
+
+        Args :
+            alphas_tous_les_lots : alpha optimal par voxel/parcelle.
+            suffix : suffixe ajouté au nom du fichier de sortie.
+            masque_roi : vecteur booléen par voxel ; si fourni, les voxels hors ROI
+                sont remplis à 1.0 (donc log10(1)=0, masqué par le seuil d'affichage
+                — cohérent avec le traitement du R² dans `brain_mapping_r2`).
+
+        Returns :
+            Path : chemin du fichier PNG sauvegardé.
+        """
+        donnees_carte = self._etendre_valeurs_masque(alphas_tous_les_lots, masque_roi, valeur_remplissage=1.0)
+        chemin_sauvegarde = self._brain_mapping_generique(donnees_carte, nom_carte="Alphas", cmap="YlOrRd", treshold=0, echelle_log=True, suffix=suffix)
         return chemin_sauvegarde
 
     def brain_mapping_tsnr(self, tsnr, suffix=""):
-        """Enregistre la carte cérébrale correspondante."""
-        # évite que les valeurs extrêmes écrasent la colorbar
-        chemin_sauvegarde = self._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues", treshold=0.0, echelle_log=False,vmin=0,vmax=np.percentile(tsnr, 95),suffix=suffix,)
+        """Enregistre la carte cérébrale du TSNR (borné au 95e percentile pour éviter
+        que les valeurs extrêmes n'écrasent la colorbar).
+
+        Args :
+            tsnr : TSNR par voxel/parcelle.
+            suffix : suffixe ajouté au nom du fichier de sortie.
+
+        Returns :
+            Path : chemin du fichier PNG sauvegardé.
+        """
+        chemin_sauvegarde = self._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues", treshold=0.0, echelle_log=False, vmin=0, vmax=np.percentile(tsnr, 95), suffix=suffix)
         return chemin_sauvegarde
 
     def regrouper_figures_dans_une_planche(self, nom_methode, liste_chemins_figures, nombre_de_colonnes=3):
@@ -949,10 +1149,16 @@ class RidgeRegression:
         validation croisée dans une seule image PNG (une "planche"), au lieu d'avoir
         un fichier séparé par figure.
 
-        `liste_chemins_figures` est la liste des chemins renvoyés par les appels à
-        brain_mapping_r2, brain_mapping_alphas, plot_accuracy, etc. Certains appels
-        peuvent renvoyer None (par exemple ROImask quand flag_precision_voxel est
-        False) : ces entrées sont ignorées ici.
+        Args :
+            nom_methode : nom de la méthode (utilisé dans le titre et le nom de fichier).
+            liste_chemins_figures : chemins renvoyés par les appels à `brain_mapping_r2`,
+                `brain_mapping_alphas`, `plot_accuracy`, etc. Les entrées None (ex.
+                ROImask quand `flag_precision_voxel` est False) sont ignorées.
+            nombre_de_colonnes : largeur de la grille d'assemblage.
+
+        Returns :
+            Path | None : chemin du fichier PNG sauvegardé, ou None si
+                `liste_chemins_figures` ne contient aucune figure valide.
         """
         # Étape 1 : on ne garde que les chemins réellement produits (pas les None).
         chemins_valides = []
@@ -1022,18 +1228,27 @@ class RidgeRegression:
 
         return chemin_sauvegarde
 
-    def generer_toutes_les_figures(self, nom_methode, resultats, grille_alphas, noms_parcelles=None):
+    def generer_toutes_les_figures(self, nom_methode, resultats, grille_alphas, noms_parcelles=None, masque_roi=None):
         """Génère et sauvegarde l'ensemble des figures standard pour UNE méthode de
         validation croisée (appelée une fois par méthode : full_manuel, ridgecv_loo,
-        one_cycle...). `resultats` est le tuple renvoyé par la méthode
-        `nested_cross_validation_*` correspondante :
-        - 7 éléments pour `nested_cross_validation_full_manuel` (avec `best_alphas_inner`,
-          le diagnostic de sous-CV interne — LOGO — que les deux autres n'ont pas) ;
-        - 6 éléments pour `nested_cross_validation_ridgecv_loo` et
-          `nested_cross_validation_one_cycle` (pas de sous-CV interne).
+        one_cycle...).
 
-        Retourne un petit résumé (dict) réutilisable pour comparer les méthodes entre
-        elles dans le `__main__`.
+        Args :
+            nom_methode : nom de la méthode (utilisé dans les noms de fichiers).
+            resultats : tuple renvoyé par la méthode `nested_cross_validation_*`
+                correspondante — 7 éléments pour `nested_cross_validation_full_manuel`
+                (avec `best_alphas_inner`, diagnostic de sous-CV interne LOGO absent
+                des deux autres méthodes), 6 éléments sinon.
+            grille_alphas : grille d'alphas testée (transmise aux histogrammes).
+            noms_parcelles : transmis à `brain_mapping_r2`/`print_scores`.
+            masque_roi : vecteur booléen par voxel ; si fourni, les cartes cérébrales
+                projettent les valeurs sur le cerveau entier (voxels hors ROI
+                masqués), et le ROImask histogram (déjà une ventilation par ROI) est
+                sauté puisque l'analyse est déjà restreinte à une ROI.
+
+        Returns :
+            dict : résumé ("r2_moyen", "r2_tous_les_tests", "alphas_moyens")
+                réutilisable pour comparer les méthodes entre elles dans `__main__`.
         """
         if len(resultats) == 7:
             r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, _, best_alphas_inner, tsnr = resultats
@@ -1053,10 +1268,10 @@ class RidgeRegression:
 
         # 1. brain_r2_map + 2. alpha_map (+ TSNR, cohérent avec les deux autres cartes)
         print(" -> Cartes cérébrales (R², Alphas, TSNR)...")
-        chemin_figure = self.brain_mapping_r2(r2_moyen, noms_parcelles, suffix=suffix)
+        chemin_figure = self.brain_mapping_r2(r2_moyen, noms_parcelles, suffix=suffix, masque_roi=masque_roi)
         liste_chemins_figures.append(chemin_figure)
 
-        chemin_figure = self.brain_mapping_alphas(alphas_moyens, suffix=suffix)
+        chemin_figure = self.brain_mapping_alphas(alphas_moyens, suffix=suffix, masque_roi=masque_roi)
         liste_chemins_figures.append(chemin_figure)
 
         #chemin_figure = self.brain_mapping_tsnr(tsnr, suffix=suffix)
@@ -1088,12 +1303,14 @@ class RidgeRegression:
         chemin_figure = self.plot_r2_threshold(r2_tous_les_tests, suffix=suffix)
         liste_chemins_figures.append(chemin_figure)
 
-        # ROIMask (uniquement en précision voxel)
-        if self.flag_precision_voxel:
+        # ROIMask (uniquement en précision voxel, et uniquement pour l'analyse cerveau
+        # entier : sur une analyse déjà restreinte à une ROI, la ventilation par ROI
+        # n'apporte rien de plus)
+        if self.flag_precision_voxel and masque_roi is None:
             print(" -> ROIMask...")
             chemin_figure = self.plot_ROImask_histogram(r2_moyen)
             liste_chemins_figures.append(chemin_figure)
-        else:
+        elif masque_roi is None:
             print(f"  -> ROIMask ignoré pour {nom_methode} (nécessite flag_precision_voxel=True).")
 
         # Regroupement de toutes les figures ci-dessus dans un seul fichier PNG.
@@ -1107,9 +1324,13 @@ class RidgeRegression:
         }
 
 if __name__ == "__main__":
-    # Point d'entrée : lance les 3 méthodes de validation croisée pour chaque sujet,
-    # génère toutes les figures associées, compare les méthodes entre elles, et lance
-    # la baseline randomisée avec la méthode manuelle.
+    # Point d'entrée : pour chaque sujet, lance les méthodes de validation croisée
+    # ("one_cycle" — protocole CNeuroMod-THINGS —, et son jumeau "ridgecv_loo") sur
+    # plusieurs zones cérébrales ("scopes"), différentes selon la précision :
+    # - précision parcelle : toutes les parcelles / parcelles visuelles (Vis) /
+    #   parcelles visuelles + attention dorsale (Vis + DorsAttn) ;
+    # - précision voxel : cerveau entier / union des ROIs rétinotopiques visuelles
+    #   et des ROIs catégorielles (fLoc).
 
     # --- PARAMÈTRES ---
     plateforme = ["Rorqual", "Mac"]
@@ -1121,13 +1342,13 @@ if __name__ == "__main__":
 
     flag_delai_bold_brute = True
     centrage_donne_temps  = False
-    flag_precision_voxel  = False
-    ROImask_flag          = False
+    flag_precision_voxel  = True   
+    ROImask_flag          = True
+
+    alphas = np.logspace(-1, 10, 20)
 
     for SUB in liste_sujets:
         print(f"\n{'='*60}\n  Sujet : {SUB}\n{'='*60}")
-
-        alphas = np.logspace(-1, 10, 20)
 
         ridge = RidgeRegression(
             plateforme, SUB, LAYER,
@@ -1135,38 +1356,36 @@ if __name__ == "__main__":
             flag_precision_voxel, ROImask_flag, randomize_flag=False
         )
 
-        ridge.afficher_X_Y_LeaveOneOut()
+        # Zones cérébrales à analyser ("scopes"), différentes selon la précision :
+        # les ROIs voxelwise (fichier ROImask) et les réseaux Yeo-7 par parcelle
+        # (fichier d'annotations de l'atlas cneuromod26) ne sont pas la même chose.
+        if flag_precision_voxel:
+            masque_rois = ridge._charger_masque_roi(ROIS_RETINOTOPIQUES + ROIS_CATEGORIELLES)
+            scopes = {
+                "cerveau_entier": None,
+                "ROIs": masque_rois,
+            }
+        else:
+            masque_visuelles = ridge._charger_masque_parcelles(RESEAUX_PARCELLES_VISUEL)
+            masque_visuelles_dorsAttn = ridge._charger_masque_parcelles(RESEAUX_PARCELLES_VISUEL_DORSATTN)
+            scopes = {
+                "toutes_parcelles": None,
+                "visuelles": masque_visuelles,
+                "visuelles_dorsAttn": masque_visuelles_dorsAttn,
+            }
 
-        """
-        # ── Les 3 méthodes de validation croisée ───────────────────────────
         methodes = {
-            "full_manuel": lambda: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1),
-            "ridgecv_loo": lambda: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1),
-            "one_cycle": lambda: ridge.nested_cross_validation_one_cycle(alphas),
+            #"one_cycle": lambda masque: ridge.nested_cross_validation_one_cycle(alphas, masque_roi=masque),
+            "ridgecv_loo": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, masque_roi=masque),
+            # Coûteux (triple boucle folds × sessions internes × alphas, pas de raccourci
+            #"full_manuel": lambda masque: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1, masque_roi=masque),
         }
 
-        resume_par_methode = {}
-        for nom_methode, executer in methodes.items():
-            print(f"\n{'-'*60}\n[MÉTHODE] {nom_methode}\n{'-'*60}")
-            resultats = executer()
-            resume_par_methode[nom_methode] = ridge.generer_toutes_les_figures(nom_methode, resultats, alphas)
-
-        # ── Comparaison entre méthodes ──────────────────────────────────────
-        print(f"\n{'='*60}\n  Comparaison des méthodes — {SUB}\n{'='*60}")
-        print(f"{'Méthode':15s} | {'R² moyen':>10s} | {'R² médian':>10s} | {'R² max':>10s}")
-        for nom_methode, resume in resume_par_methode.items():
-            r2 = resume["r2_moyen"]
-            print(f"{nom_methode:15s} | {np.mean(r2):10.4f} | {np.median(r2):10.4f} | {np.max(r2):10.4f}")
-
-        # ── Baseline randomisée (randomization test), méthode manuelle uniquement ──
-        print(f"\n{'='*60}\n  Randomization test — {SUB} (nested_cross_validation_full_manuel)\n{'='*60}")
-        ridge_random = RidgeRegression(
-            plateforme, SUB, LAYER,
-            flag_delai_bold_brute, centrage_donne_temps,
-            flag_precision_voxel, ROImask_flag, randomize_flag=True
-        )
-        resultats_random = ridge_random.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1)
-        ridge_random.generer_toutes_les_figures("full_manuel_randomise", resultats_random, alphas)
+        for nom_scope, masque_roi in scopes.items():
+            for nom_methode, executer in methodes.items():
+                nom_complet = f"{nom_methode}_{nom_scope}"
+                print(f"\n{'-'*60}\n[{nom_complet}] — {SUB}\n{'-'*60}")
+                resultats = executer(masque_roi)
+                ridge.generer_toutes_les_figures(nom_complet, resultats, alphas, masque_roi=masque_roi)
 
         print(f"\nTerminé pour le sujet {SUB}. Toutes les figures ont été sauvegardées.")
-        """
