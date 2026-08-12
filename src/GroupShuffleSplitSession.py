@@ -36,19 +36,7 @@ class GroupShuffleSplitSession:
         for _ in range(self.n_splits):
             shuffled = rng.permutation(sessions_uniques)
             test_sessions = shuffled[:nb_test]
-            train_sessions_raw = shuffled[nb_test:nb_test + nb_train]
-
-            # Trouver tous les adjacents de toutes les sessions de test
-            adjacents = set()
-            for t in test_sessions:
-                idx = np.where(sessions_uniques == t)[0][0]
-                if idx > 0:
-                    adjacents.add(sessions_uniques[idx - 1])
-                if idx < n_sessions - 1:
-                    adjacents.add(sessions_uniques[idx + 1])
-
-            # Filtrer le train set
-            train_sessions = [s for s in train_sessions_raw if s not in adjacents]
+            train_sessions = shuffled[nb_test:nb_test + nb_train]
 
             # Scikit-learn attend les index des lignes (et non les IDs des sessions)
             train_idx = np.where(np.isin(groups, train_sessions))[0]
