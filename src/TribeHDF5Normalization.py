@@ -135,9 +135,9 @@ if __name__ == "__main__":
 
     # 1. Définition des chemins dynamiques
     ROOT = Path(__file__).parent.parent
-    DATA_DIR = ROOT / "data"
+    DATA_DIR = ROOT / "data" / "things_mp4_vfr"
     chemin_video = DATA_DIR / "sub-01" / "ses-001" / "sub-01_ses-001_task-thingsmemory_run-1.mp4"
-    chemin_tribe = ROOT / "output" / "hdf5" / "sub-01.h5"
+    chemin_tribe = ROOT / "output" / "features" / "things_encoding" / "sub-01.h5"
     if flag_precision_voxel == True:
         chemin_cneuromod = ROOT / "data" / "timeseries" / "voxel_native" / "sub-03" / "sub-03_task-things_space-T1w_desc-voxelwise_timeseries.h5"
     else :

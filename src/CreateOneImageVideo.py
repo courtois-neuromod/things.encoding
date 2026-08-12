@@ -14,12 +14,12 @@ if plateforme == "Rorqual":
     CFR_DIR = ROOT_ENCODING / "data" / "things_mp4_cfr"
 else:
     ROOT_ENCODING = Path(__file__).parent.parent
-    # Sur Mac, les TSV sont directement dans data/sub-XX/...
-    DATA_DIR = ROOT_ENCODING / "data"
+    # Sur Mac, les TSV sont dans data/things_mp4_vfr/sub-XX/...
+    DATA_DIR = ROOT_ENCODING / "data" / "things_mp4_vfr"
     # Dossier des vidéos CFR sur Mac
     CFR_DIR = ROOT_ENCODING / "data" / "things_mp4_cfr"
 
-OUTPUT_DIR = ROOT_ENCODING / "output" / "OneImageVideo"
+OUTPUT_DIR = ROOT_ENCODING / "output" / "analysis" / "OneImageVideo"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Récupère tous les .tsv récursivement dans les sous-dossiers

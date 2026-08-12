@@ -75,8 +75,8 @@ if __name__ == "__main__":
   converter = VFRtoCFRConverter(fps=64, crf=20)
 
   ROOT = Path(__file__).parent.parent
-  DATA_DIR = ROOT / "data"
-  OUTPUT_DIR = ROOT / "things-cfr"
+  DATA_DIR = ROOT / "data" / "things_mp4_vfr"
+  OUTPUT_DIR = ROOT / "data" / "things_mp4_cfr"
 
   video_files = sorted(DATA_DIR.glob("**/sub-*_*_task-*.mp4"))
 

@@ -48,5 +48,5 @@ def explorer_hdf5(chemin: Path) -> None:
 
 if __name__ == '__main__':
 
-    chemin = Path("../output/hdf5/friends/friends_s01e01a.h5")
+    chemin = Path("../data/brain_map_subj/sub-01_space-T1w_desc-ROImasks_voxelAnnotations.h5")
     explorer_hdf5(chemin)

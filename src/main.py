@@ -30,7 +30,7 @@ if __name__ == '__main__':
 
     ROOT = Path(__file__).parent.parent
     DATA_DIR = ROOT / "data" / "things_mp4_cfr"
-    HDF5_DIR = ROOT / "output/hdf5/things_encoding"
+    HDF5_DIR = ROOT / "output" / "features" / "things_encoding"
 
     model = config.charger_modele()
     fmri_enc = model.__pydantic_private__['_model']

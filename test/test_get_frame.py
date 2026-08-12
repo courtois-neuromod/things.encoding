@@ -5,7 +5,7 @@ from moviepy import VideoFileClip
 from PIL import Image
 
 
-def tester_get_frame(chemin_video, dossier_sortie="../output/test_frames"):
+def tester_get_frame(chemin_video, dossier_sortie="../output/analysis/test_frames"):
     print(f"--- Début des tests pour : {chemin_video} ---")
 
     # 1. Chargement de la vidéo
@@ -44,7 +44,7 @@ def tester_get_frame(chemin_video, dossier_sortie="../output/test_frames"):
 # --- Utilisation ---
 if __name__ == "__main__":
     # Chemin de la vidéo à tester
-    FICHIER_TEST = "../data/sub-01/ses-001/sub-01_ses-001_task-thingsmemory_run-1.mp4"
+    FICHIER_TEST = "../data/things_mp4_vfr/sub-01/ses-001/sub-01_ses-001_task-thingsmemory_run-1.mp4"
 
     if os.path.exists(FICHIER_TEST):
         tester_get_frame(FICHIER_TEST)

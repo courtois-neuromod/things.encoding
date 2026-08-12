@@ -26,6 +26,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from GroupShuffleSplitSession import GroupShuffleSplitSession
+from litcoder_folding import create_chunked_folds_trimmed
 from TribeHDF5Normalization import TribeHDF5Normalization
 
 # Ignore spécifiquement les avertissements de matrices mal conditionnées
@@ -134,9 +135,9 @@ class RidgeRegression:
             ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
         else:
             ROOT_ENCODING = Path(__file__).parent.parent
-            ROOT_TIMESERIES = ROOT_ENCODING
+            ROOT_TIMESERIES = ROOT_ENCODING / "data"
 
-        chemin_tribe = ROOT_ENCODING / "output" / "hdf5" / "things_encoding" / f"{self.subject}.h5"
+        chemin_tribe = ROOT_ENCODING / "output" / "features" / "things_encoding" / f"{self.subject}.h5"
         chemin_ROImask = ROOT_ENCODING / "data" / "brain_map_subj" / f"{self.subject}_space-T1w_desc-ROImasks_voxelAnnotations.h5"
 
         chemin_annotations_parcelles = ROOT_ENCODING / "data" / "brain_map_subj" / NOM_FICHIER_ANNOTATIONS_PARCELLES
@@ -194,7 +195,7 @@ class RidgeRegression:
                     if self.plateforme == "Rorqual":
                         chemin_video = chemins.root_encoding / "data" / "data" / self.subject / tribe_ses / nom_video
                     else:
-                        chemin_video = chemins.root_encoding / "data" / self.subject / tribe_ses / nom_video
+                        chemin_video = chemins.root_encoding / "data" / "things_mp4_vfr" / self.subject / tribe_ses / nom_video
 
                     runs.append((tribe_ses, tribe_run, chemin_video, cneuromod_ses, cneuromod_dataset))
         finally:
@@ -220,6 +221,7 @@ class RidgeRegression:
         X_list, Y_list = [], []
         runs_ok = []
         groupes_list = []
+        runs_list = []
 
         print(f"Traitement des runs pour {self.subject} (TRIBE layer={self.layer})...")
         with h5py.File(chemins.chemin_tribe, "r") as tribe_hdf5, \
@@ -265,6 +267,7 @@ class RidgeRegression:
                 num_ses = int(tribe_ses.replace("ses-", ""))
                 id_array = np.full(X_run.shape[0], num_ses)
                 groupes_list.append(id_array)
+                runs_list.append(np.full(X_run.shape[0], f"{tribe_ses}/{tribe_run}"))
 
             print(f"\n{len(runs_ok)} runs traités avec succès")
 
@@ -296,7 +299,14 @@ class RidgeRegression:
             groupes = np.concatenate(groupes_list, axis=0)
             print(f"Matrice finale : X={X.shape}, Y={Y.shape}")
 
-            del X_list, Y_list, groupes_list
+            # Identifiant de run par échantillon (ex. "ses-014/run-03"), pas exposé
+            # dans le tuple retourné (pour ne pas casser les appelants existants) :
+            # stocké comme attribut, filtré en parallèle de X/Y/groupes par
+            # `_selection_X_Y`, et utilisé pour les diagnostics de composition des
+            # folds (cf. `_afficher_composition_runs`).
+            self._runs_par_echantillon = np.concatenate(runs_list, axis=0)
+
+            del X_list, Y_list, groupes_list, runs_list
 
             return runs_ok, X, Y, groupes, TSNR
 
@@ -315,10 +325,105 @@ class RidgeRegression:
         if sessions_a_exclure is not None:
             masque = ~np.isin(groupes, sessions_a_exclure)
             X, Y, groupes = X[masque], Y[masque], groupes[masque]
+            self._runs_par_echantillon = self._runs_par_echantillon[masque]
         if masque_roi is not None:
             Y = Y[:, masque_roi]
             TSNR = TSNR[masque_roi]
         return X, Y, groupes, TSNR
+
+    def _plages_contigues(self, positions):
+        """Condense une liste de positions (int) triables en plages contiguës
+        (ex. [0,1,2,3,10,11] -> ["0-3", "10-11"]), pour un affichage résumé au lieu
+        de lister chaque TR un par un."""
+        positions = np.asarray(sorted(int(p) for p in positions))
+        if len(positions) == 0:
+            return []
+        ruptures = np.where(np.diff(positions) > 1)[0]
+        debuts = np.concatenate(([0], ruptures + 1))
+        fins = np.concatenate((ruptures, [len(positions) - 1]))
+        plages = []
+        for d, f in zip(debuts, fins):
+            if positions[d] == positions[f]:
+                plages.append(f"{positions[d]}")
+            else:
+                plages.append(f"{positions[d]}-{positions[f]}")
+        return plages
+
+    def _afficher_composition_runs(self, groupes, runs, train_idx, test_idx):
+        """Affiche, pour chaque session dont des runs se retrouvent à la fois en
+        train et en test, le détail des runs de chaque côté (juste les numéros de
+        run, la session est déjà donnée par la ligne). Pour un run coupé (présent
+        des deux côtés), affiche en plus les plages de TR (position dans le run,
+        0 = premier TR acquis) envoyées en train / test / ni l'un ni l'autre
+        (TR retirés par `trim_size`), et signale explicitement tout TR qui
+        apparaîtrait à la fois en train ET en test (ne devrait structurellement
+        jamais arriver : `create_chunked_folds_trimmed` partitionne les chunks
+        sans recouvrement — ce contrôle sert à le vérifier plutôt qu'à le supposer).
+
+        Diagnostic pensé pour les splits qui ignorent la structure de session (ex.
+        `create_chunked_folds_trimmed`, dont les chunks sont des runs individuels) :
+        une session "coupée" signifie que certains de ses runs sont en train et
+        d'autres en test, donc une fuite potentielle (même session, même jour,
+        même bruit physiologique/drift des deux côtés). Un run "coupé" (TR en
+        train et TR en test dans le MÊME run) indique en plus que `chunk_length`
+        n'est pas alignée sur les frontières réelles de run (ex. runs de longueur
+        variable après normalisation) : le point de coupure tombe alors n'importe
+        où au milieu du run, pas à son bord.
+
+        Args :
+            groupes : numéro de session par échantillon (retourné par `_selection_X_Y`).
+            runs : identifiant de run par échantillon (`self._runs_par_echantillon`,
+                aligné sur `groupes` après filtrage par `_selection_X_Y`).
+            train_idx, test_idx : indices du fold courant.
+        """
+        n_samples = len(groupes)
+        est_train = np.zeros(n_samples, dtype=bool)
+        est_test = np.zeros(n_samples, dtype=bool)
+        est_train[train_idx] = True
+        est_test[test_idx] = True
+
+        run_numeros = np.array([int(str(r).rsplit("run-", 1)[1]) for r in runs])
+
+        sessions_toutes = sorted(set(int(s) for s in groupes))
+        sessions_train = set(int(s) for s in groupes[train_idx])
+        sessions_test = set(int(s) for s in groupes[test_idx])
+        sessions_melangees = sorted(sessions_train & sessions_test)
+
+        print(f"    Sessions : train {len(sessions_train)}/{len(sessions_toutes)}, "
+              f"test {len(sessions_test)}/{len(sessions_toutes)}, "
+              f"mélangées train+test (fuite potentielle) {len(sessions_melangees)}/{len(sessions_toutes)}")
+
+        if not sessions_melangees:
+            return
+
+        for ses in sessions_melangees:
+            masque_ses = groupes == ses
+            runs_train = sorted(int(r) for r in set(run_numeros[masque_ses & est_train]))
+            runs_test = sorted(int(r) for r in set(run_numeros[masque_ses & est_test]))
+            print(f"      ses-{ses:03d} : train={str(runs_train):<18} test={runs_test}")
+
+            for r in sorted(set(runs_train) & set(runs_test)):
+                masque_run = masque_ses & (run_numeros == r)
+                indices_run = np.where(masque_run)[0]  # ordre d'acquisition (contigu par construction)
+                train_run = np.isin(indices_run, train_idx)
+                test_run = np.isin(indices_run, test_idx)
+
+                plages_train = self._plages_contigues(np.where(train_run)[0])
+                plages_test = self._plages_contigues(np.where(test_run)[0])
+                detail = (f"train TR {','.join(plages_train) or '—'} ({int(train_run.sum())})  |  "
+                          f"test TR {','.join(plages_test) or '—'} ({int(test_run.sum())})")
+
+                ni_lun_ni_lautre = ~(train_run | test_run)
+                if ni_lun_ni_lautre.any():
+                    plages_trim = self._plages_contigues(np.where(ni_lun_ni_lautre)[0])
+                    detail += f"  |  retiré (trim) TR {','.join(plages_trim)} ({int(ni_lun_ni_lautre.sum())})"
+
+                print(f"        run-{r} ({len(indices_run)} TR) : {detail}")
+
+                chevauchement = train_run & test_run
+                if chevauchement.any():
+                    plages_dup = self._plages_contigues(np.where(chevauchement)[0])
+                    print(f"        !! {int(chevauchement.sum())} TR du run-{r} en train ET en test : {','.join(plages_dup)}")
 
     def _charger_masque_roi(self, noms_rois):
         """Charge le masque booléen (union) des voxels appartenant à une ou plusieurs
@@ -590,6 +695,88 @@ class RidgeRegression:
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
+    def nested_cross_validation_chunked_trimmed_ridgecv_loo(self, grille_alphas, n_folds=5, chunk_length=190, trim_size=5, seed=None, masque_roi=None):
+        """Jumeau de `nested_cross_validation_ridgecv_loo` : même boucle interne
+        (`RidgeCV(cv=None)`, alpha par voxel via LOO analytique), mais split externe
+        remplacé par `create_chunked_folds_trimmed` (litcoder_core, voir
+        `src/litcoder_folding.py`) au lieu de `GroupShuffleSplitSession`.
+
+        Args :
+            grille_alphas : valeurs d'alpha à tester.
+            n_folds : nombre de folds externes.
+            chunk_length : taille des chunks (en TR) découpés dans X/Y avant tirage.
+                DOIT être un multiple de la longueur d'un run (190 TR pour things,
+                cf. test/test_litcoder_folding.py) sous peine de couper des runs
+                entre train et test (fuite temporelle)
+            trim_size : nombre de TR retirés aux deux bords de chaque chunk de test
+                (réduction de la fuite par autocorrélation), le chunk de train
+                correspondant reste entier.
+            seed : graine du tirage (mélange des chunks) et du split externe.
+            masque_roi : vecteur booléen par voxel (cf. `_charger_masque_roi`) pour
+                restreindre l'analyse à une ROI ; None = cerveau entier.
+
+        Returns :
+            tuple : (r2_moyen, r2_variance_inter_folds, r2_tous_les_tests,
+                alphas_tous_externes, alphas_tous_externes_moyen, TSNR).
+
+        Notes :
+            Contrairement à `GroupShuffleSplitSession`, `create_chunked_folds_trimmed`
+            ne retire pas du train les chunks adjacents aux chunks de test : seul le
+            trimming interne aux chunks de test protège contre l'autocorrélation.
+        """
+        X, Y, groupes, TSNR = self._selection_X_Y(masque_roi=masque_roi)
+        n_samples = X.shape[0]
+        n_features = Y.shape[1]
+
+        rng = np.random.default_rng(seed)
+        folds = create_chunked_folds_trimmed(
+            n_samples, n_folds, chunk_length, trim_size=trim_size, shuffle=True, rng=rng
+        )
+
+        r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
+        alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
+
+        for i, (train_idx, test_idx) in enumerate(folds):
+            print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
+
+            train_idx, test_idx = np.array(train_idx), np.array(test_idx)
+            X_train, Y_train = X[train_idx], Y[train_idx]
+            X_test, Y_test = X[test_idx], Y[test_idx]
+            
+            print(f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples")
+            self._afficher_composition_runs(groupes, self._runs_par_echantillon, train_idx, test_idx)
+            """
+            # alpha_per_target=True : un alpha par voxel, uniquement compatible avec cv=None (LOO).
+            # TransformedTargetRegressor standardise/dé-standardise Y automatiquement.
+            modele = TransformedTargetRegressor(
+                regressor=make_pipeline(
+                    StandardScaler(),
+                    RidgeCV(alphas=grille_alphas, alpha_per_target=True, cv=None, scoring="r2"),
+                ),
+                transformer=StandardScaler(),
+            )
+            modele.fit(X_train, Y_train)
+
+            ridgecv_ajuste = modele.regressor_.named_steps["ridgecv"]
+            alphas_tous_externes[i, :] = ridgecv_ajuste.alpha_
+
+            # Prédictions déjà ramenées à l'échelle d'origine par TransformedTargetRegressor
+            Y_pred = modele.predict(X_test)
+            r2_score_fold = r2_score(Y_test, Y_pred, multioutput='raw_values')
+            r2_tous_les_tests[i, :] = r2_score_fold
+            print(f"-> R2 mean : {np.mean(r2_score_fold)}")
+            print(f"-> R2 max : {np.max(r2_score_fold)}")
+
+            # Nettoyage mémoire
+            del modele, Y_pred
+            gc.collect()
+
+        r2_moyen = np.mean(r2_tous_les_tests, axis=0)
+        r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
+        alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
+
+        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
+        """
     def _generer_folds_one_cycle(self):
         """Construit les folds Train/Validation/Test/Buffer du protocole 'one cycle'
         (sessions numérotées 1..36).
@@ -745,7 +932,8 @@ class RidgeRegression:
             Path : chemin complet du fichier sauvegardé.
         """
         chemins = self.get_path_file_by_plateform(self.plateforme)
-        chemin_sortie = chemins.root_encoding / "output" / nom_fichier
+        chemin_sortie = chemins.root_encoding / "output" / "analysis" / nom_fichier
+        chemin_sortie.parent.mkdir(parents=True, exist_ok=True)
         figure_sauvegardable.savefig(chemin_sortie, dpi=DPI_FIGURES, **kwargs_savefig)
         print(f"{message} : {chemin_sortie}")
         return chemin_sortie
@@ -1315,7 +1503,15 @@ class RidgeRegression:
 
         # Regroupement de toutes les figures ci-dessus dans un seul fichier PNG.
         print(" -> Assemblage de la planche de figures...")
-        self.regrouper_figures_dans_une_planche(nom_methode, liste_chemins_figures)
+        chemin_planche = self.regrouper_figures_dans_une_planche(nom_methode, liste_chemins_figures)
+
+        # Une fois la planche assemblée, les figures individuelles ne servent plus :
+        # on les supprime pour ne garder que le fichier fusionné.
+        if chemin_planche is not None:
+            for chemin_figure in liste_chemins_figures:
+                if chemin_figure is not None and chemin_figure != chemin_planche:
+                    chemin_figure.unlink(missing_ok=True)
+            print(f" -> Figures individuelles supprimées ({len(liste_chemins_figures)} fichiers).")
 
         return {
             "r2_moyen": r2_moyen,
@@ -1342,8 +1538,8 @@ if __name__ == "__main__":
 
     flag_delai_bold_brute = True
     centrage_donne_temps  = False
-    flag_precision_voxel  = True   
-    ROImask_flag          = True
+    flag_precision_voxel  = False   
+    ROImask_flag          = False
 
     alphas = np.logspace(-1, 10, 20)
 
@@ -1377,6 +1573,7 @@ if __name__ == "__main__":
         methodes = {
             #"one_cycle": lambda masque: ridge.nested_cross_validation_one_cycle(alphas, masque_roi=masque),
             "ridgecv_loo": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, masque_roi=masque),
+            #"chunked_trimmed_ridgecv_loo": lambda masque: ridge.nested_cross_validation_chunked_trimmed_ridgecv_loo(alphas, n_folds=10, chunk_length=180, seed=49, masque_roi=masque)
             # Coûteux (triple boucle folds × sessions internes × alphas, pas de raccourci
             #"full_manuel": lambda masque: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1, masque_roi=masque),
         }

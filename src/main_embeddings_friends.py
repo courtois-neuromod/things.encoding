@@ -45,7 +45,7 @@ if __name__ == '__main__':
         ROOT_STIMULI = ROOT_ENCODING / "friends.stimuli" / f"s{season}"
 
     DATA_DIR = ROOT_STIMULI
-    HDF5_DIR = ROOT_ENCODING / "output" / "hdf5" / "friends"
+    HDF5_DIR = ROOT_ENCODING / "output" / "features" / "friends"
 
     config = Config(
         plateforme=plateforme,
