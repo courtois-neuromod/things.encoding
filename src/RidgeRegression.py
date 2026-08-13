@@ -13,6 +13,7 @@ import h5py
 import numpy as np
 import pandas as pd
 from scipy.linalg import LinAlgWarning
+from scipy.stats import ConstantInputWarning, pearsonr
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.metrics import r2_score
@@ -28,6 +29,12 @@ from VisualisationResultats import VisualisationResultats
 
 # Ignore spécifiquement les avertissements de matrices mal conditionnées
 warnings.filterwarnings(action='ignore', category=LinAlgWarning)
+
+# Idem pour les colonnes constantes rencontrées par `pearsonr` : un voxel plat, ou
+# une prédiction plate quand l'alpha retenu est proche de 1e10, donne un écart-type
+# nul donc une corrélation indéfinie. scipy renvoie alors NaN (ramené à 0 juste après
+# le calcul), ce qui est le comportement voulu — l'avertissement n'apporte rien.
+warnings.filterwarnings(action='ignore', category=ConstantInputWarning)
 
 # Idem pour les débordements numpy (divide/overflow/invalid) rencontrés lors des
 # fits Ridge avec les plus grands alphas de la grille (jusqu'à 1e10) : ils produisent
@@ -83,6 +90,137 @@ class CheminsProjet:
     chemin_ROImask: Path
     chemin_anatomie: Path = None
     chemin_annotations_parcelles: Path = None
+
+
+@dataclass
+class ResultatsCV:
+    """Sortie commune des quatre méthodes `nested_cross_validation_*`.
+
+    Les champs obligatoires sont produits par toutes les méthodes ; les champs
+    optionnels ne le sont que par certaines, et valent None ailleurs. C'est ce qui
+    remplace l'ancien dispatch par longueur de tuple côté figures : on teste
+    `resultats.best_alphas_inner is not None`, pas `len(resultats) == 7`.
+
+    `VisualisationResultats` lit ces champs par attribut sans importer ce module :
+    la dépendance reste à sens unique (RidgeRegression -> VisualisationResultats).
+
+    Attributs :
+        r2_moyen : R² moyen par voxel/parcelle, shape (n_features,).
+        r2_variance_inter_folds : variance du R² entre folds externes, (n_features,).
+        r2_tous_les_tests : R² par fold externe, (n_folds, n_features).
+        alphas_tous_externes : alpha retenu par fold externe, (n_folds, n_features).
+        alphas_tous_externes_moyen : moyenne arithmétique des alphas, (n_features,).
+        TSNR : rapport signal/bruit temporel par voxel/parcelle, (n_features,).
+        best_alphas_inner : alphas des folds internes LOGO — `full_manuel` seule.
+        pearson_moyen, pearson_variance_inter_folds, pearson_tous_les_tests :
+            corrélation de Pearson entre BOLD mesuré et prédit — `one_cycle` seule.
+    """
+
+    r2_moyen: np.ndarray
+    r2_variance_inter_folds: np.ndarray
+    r2_tous_les_tests: np.ndarray
+    alphas_tous_externes: np.ndarray
+    alphas_tous_externes_moyen: np.ndarray
+    TSNR: np.ndarray
+    best_alphas_inner: np.ndarray = None
+    pearson_moyen: np.ndarray = None
+    pearson_variance_inter_folds: np.ndarray = None
+    pearson_tous_les_tests: np.ndarray = None
+
+    # Champs indexés par voxel/parcelle, shape (n_features,).
+    _CHAMPS_PAR_FEATURE = (
+        "r2_moyen", "r2_variance_inter_folds", "alphas_tous_externes_moyen",
+        "TSNR", "pearson_moyen", "pearson_variance_inter_folds",
+    )
+    # Champs indexés (lignes, n_features) : folds externes, ou (folds × sessions)
+    # internes pour `best_alphas_inner`. Seule la 2e dimension est restreinte.
+    _CHAMPS_PAR_LIGNE = (
+        "r2_tous_les_tests", "alphas_tous_externes", "best_alphas_inner",
+        "pearson_tous_les_tests",
+    )
+
+    def restreindre(self, masque):
+        """Renvoie les mêmes résultats limités à un sous-ensemble de voxels/parcelles.
+
+        Chaque voxel est régressé INDÉPENDAMMENT des autres : `StandardScaler`
+        normalise colonne par colonne, `alpha_per_target=True` choisit un alpha par
+        cible, `r2_score(multioutput='raw_values')` score par colonne, et le découpage
+        train/test ne dépend que des sessions/runs, pas du masque. Sélectionner des
+        colonnes après coup donne donc exactement ce qu'aurait donné une CV relancée
+        sur ce seul sous-ensemble — vérifié à ~1e-16 près sur les deux chemins de
+        modèle du projet, cf. `test/test_equivalence_scopes.py`.
+
+        C'est ce qui permet de ne lancer la CV qu'une fois pour tous les scopes,
+        au lieu d'une fois par scope (et donc de ne charger les données qu'une fois).
+
+        Args :
+            masque : booléen par voxel/parcelle, exprimé dans l'espace de CES
+                résultats — pas dans l'espace complet du cerveau si la CV a elle-même
+                été restreinte (cf. `masque_relatif`). None = aucune restriction.
+
+        Returns :
+            ResultatsCV : nouvelle instance, ou `self` si `masque` est None. Les
+                champs optionnels valant None le restent.
+        """
+        if masque is None:
+            return self
+
+        champs = {}
+        for nom in self._CHAMPS_PAR_FEATURE:
+            valeur = getattr(self, nom)
+            champs[nom] = None if valeur is None else valeur[masque]
+        for nom in self._CHAMPS_PAR_LIGNE:
+            valeur = getattr(self, nom)
+            champs[nom] = None if valeur is None else valeur[:, masque]
+        return ResultatsCV(**champs)
+
+
+def scope_disponible(masque_scope, masque_cv):
+    """Dit si un scope peut être dérivé des résultats d'une CV, sans la relancer.
+
+    Séparé de `masque_relatif` à dessein : ce dernier renvoie None pour signifier
+    « aucune restriction à appliquer », ce qui ne doit surtout pas se confondre avec
+    « scope indisponible ». Deux questions distinctes, deux fonctions.
+
+    Args :
+        masque_scope : booléen sur l'espace complet, ou None (= tout le cerveau).
+        masque_cv : booléen sur l'espace complet ayant servi à la CV, ou None.
+
+    Returns :
+        bool : True si le scope est inclus dans ce que la CV a réellement couvert.
+            Un scope indisponible n'est pas une erreur, juste une case en moins dans
+            la figure de comparaison.
+    """
+    if masque_cv is None:
+        return True                 # la CV couvre tout : n'importe quel scope en dérive
+    if masque_scope is None:
+        # "Tout le cerveau" ne se dérive pas d'une CV restreinte : l'afficher
+        # reviendrait à étiqueter le sous-espace de la CV comme s'il était complet.
+        return False
+    return bool(np.all(masque_cv[masque_scope]))
+
+
+def masque_relatif(masque_scope, masque_cv):
+    """Exprime un masque de scope dans l'espace des résultats d'une CV restreinte.
+
+    Les masques de scope (`_charger_masque_roi`, `_charger_masque_parcelles`) sont
+    définis sur l'espace COMPLET du cerveau, alors que `ResultatsCV.restreindre`
+    attend un masque exprimé dans l'espace des résultats. Quand la CV a tourné sur
+    tout le cerveau (le cas courant), les deux coïncident ; sinon il faut reprojeter.
+
+    À n'appeler que sur un scope validé par `scope_disponible`.
+
+    Args :
+        masque_scope : booléen sur l'espace complet, ou None (= tout le cerveau).
+        masque_cv : booléen sur l'espace complet ayant servi à la CV, ou None.
+
+    Returns :
+        np.ndarray | None : masque à passer à `ResultatsCV.restreindre`. None
+            signifie « aucune restriction », jamais « indisponible ».
+    """
+    if masque_cv is None:
+        return masque_scope
+    return masque_scope[masque_cv]
 
 
 class RidgeRegression:
@@ -530,9 +668,8 @@ class RidgeRegression:
                 restreindre l'analyse à une ROI ; None = cerveau entier.
 
         Returns :
-            tuple : (r2_moyen, r2_variance_inter_folds, r2_tous_les_tests,
-                alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner,
-                TSNR).
+            ResultatsCV : avec `best_alphas_inner` renseigné (seule méthode à produire
+                des alphas de folds internes) et les champs Pearson à None.
 
         Notes :
             - Jumeau de `nested_cross_validation_ridgecv_loo` : même split externe et
@@ -639,7 +776,15 @@ class RidgeRegression:
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
         best_alphas_inner = np.array(best_alphas_inner_toutes_folds)
 
-        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, TSNR
+        return ResultatsCV(
+            r2_moyen=r2_moyen,
+            r2_variance_inter_folds=r2_variance_inter_folds,
+            r2_tous_les_tests=r2_tous_les_tests,
+            alphas_tous_externes=alphas_tous_externes,
+            alphas_tous_externes_moyen=alphas_tous_externes_moyen,
+            TSNR=TSNR,
+            best_alphas_inner=best_alphas_inner,
+        )
 
     def nested_cross_validation_ridgecv_loo(self, grille_alphas, n_folds=5, test_size=0.2, niveau_split="session", n_buffer=1, seed=None, masque_roi=None):
         """Jumeau sklearn-natif de `nested_cross_validation_full_manuel` : remplace la
@@ -660,8 +805,8 @@ class RidgeRegression:
                 restreindre l'analyse à une ROI ; None = cerveau entier.
 
         Returns :
-            tuple : (r2_moyen, r2_variance_inter_folds, r2_tous_les_tests,
-                alphas_tous_externes, alphas_tous_externes_moyen, TSNR).
+            ResultatsCV : champs `best_alphas_inner` et Pearson à None (pas de sous-CV
+                interne explicite ici, l'alpha est choisi en interne par `RidgeCV`).
 
         Notes :
             LOO (par timepoint) au lieu de LOGO (par session) est la seule différence
@@ -717,7 +862,14 @@ class RidgeRegression:
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
-        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
+        return ResultatsCV(
+            r2_moyen=r2_moyen,
+            r2_variance_inter_folds=r2_variance_inter_folds,
+            r2_tous_les_tests=r2_tous_les_tests,
+            alphas_tous_externes=alphas_tous_externes,
+            alphas_tous_externes_moyen=alphas_tous_externes_moyen,
+            TSNR=TSNR,
+        )
 
     def nested_cross_validation_chunked_trimmed_ridgecv_loo(self, grille_alphas, n_folds=5, chunk_length=None, trim_size=5, seed=None, masque_roi=None):
         """Jumeau de `nested_cross_validation_ridgecv_loo` : même boucle interne
@@ -746,8 +898,7 @@ class RidgeRegression:
                 restreindre l'analyse à une ROI ; None = cerveau entier.
 
         Returns :
-            tuple : (r2_moyen, r2_variance_inter_folds, r2_tous_les_tests,
-                alphas_tous_externes, alphas_tous_externes_moyen, TSNR).
+            ResultatsCV : champs `best_alphas_inner` et Pearson à None.
 
         Notes :
             Contrairement à `GroupShuffleSplitRun`, `create_chunked_folds_trimmed` ne
@@ -806,7 +957,14 @@ class RidgeRegression:
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
-        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
+        return ResultatsCV(
+            r2_moyen=r2_moyen,
+            r2_variance_inter_folds=r2_variance_inter_folds,
+            r2_tous_les_tests=r2_tous_les_tests,
+            alphas_tous_externes=alphas_tous_externes,
+            alphas_tous_externes_moyen=alphas_tous_externes_moyen,
+            TSNR=TSNR,
+        )
 
     def _generer_folds_one_cycle(self):
         """Construit les folds Train/Validation/Test/Buffer du protocole 'one cycle'
@@ -858,14 +1016,19 @@ class RidgeRegression:
                 restreindre l'analyse à une ROI ; None = cerveau entier.
 
         Returns :
-            tuple : (r2_moyen, r2_variance_inter_folds, r2_tous_les_tests,
-                alphas_tous_externes, alphas_tous_externes_moyen, TSNR).
+            ResultatsCV : seule méthode à renseigner les champs Pearson
+                (`pearson_moyen`, `pearson_variance_inter_folds`,
+                `pearson_tous_les_tests`) ; `best_alphas_inner` reste à None.
 
         Notes :
-            Un seul bloc de Validation par fold (pas plusieurs folds internes à
-            agréger) : le R² de sélection est calculé en unités brutes (prédictions
-            dé-standardisées), par cohérence avec les deux autres jumeaux, même si
-            le R² est en réalité invariant à une transformation affine.
+            - Un seul bloc de Validation par fold (pas plusieurs folds internes à
+              agréger) : le R² de sélection est calculé en unités brutes (prédictions
+              dé-standardisées), par cohérence avec les deux autres jumeaux, même si
+              le R² est en réalité invariant à une transformation affine.
+            - Le Pearson est une seconde lecture de la même prédiction, pas une
+              seconde carte : il ignore le biais et l'échelle que le R² pénalise, donc
+              il est mécaniquement plus haut. Il n'est affiché que dans la figure
+              accuracy (aucune carte cérébrale dédiée).
         """
         X, Y, groupes, TSNR = self._selection_X_Y(masque_roi=masque_roi)
         n_features = Y.shape[1]
@@ -878,6 +1041,7 @@ class RidgeRegression:
             print(f"     Fold {i + 1} | Validation={fold['validation']} | Buffer={fold['buffer']} | Train={len(fold['train'])} sessions")
 
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
+        pearson_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
 
         # Indices des folds réellement évalués : un fold sauté (Validation ou Test vide)
@@ -941,10 +1105,20 @@ class RidgeRegression:
             Y_pred_scaled = ridge_final.predict(X_test_scaled)
 
             r2_score_fold = r2_score(Y_test_scaled, Y_pred_scaled, multioutput='raw_values')
+
+            # `pearsonr` est vectorisé par colonne via `axis=0` (SciPy >= 1.13) : une
+            # corrélation par voxel/parcelle, sans boucle Python. Un voxel plat ou une
+            # prédiction plate donne NaN (écart-type nul) — ramené à 0, comme un
+            # "aucune corrélation détectable", pour ne pas contaminer les agrégations.
+            pearson_score_fold = np.nan_to_num(
+                pearsonr(Y_test_scaled, Y_pred_scaled, axis=0).statistic, nan=0.0
+            )
+
             r2_tous_les_tests[i, :] = r2_score_fold
+            pearson_tous_les_tests[i, :] = pearson_score_fold
             folds_evalues.append(i)
-            print(f"-> R2 mean : {np.mean(r2_score_fold)}")
             print(f"-> R2 max : {np.max(r2_score_fold)}")
+            print(f"-> Pearson max : {np.max(pearson_score_fold)}")
 
             del ridge_final, Y_pred_scaled
             gc.collect()
@@ -962,13 +1136,26 @@ class RidgeRegression:
             print(f"  -> {n_folds - len(folds_evalues)} fold(s) sauté(s) sur {n_folds} : "
                   "exclus des agrégations et des tableaux renvoyés.")
         r2_tous_les_tests = r2_tous_les_tests[folds_evalues]
+        pearson_tous_les_tests = pearson_tous_les_tests[folds_evalues]
         alphas_tous_externes = alphas_tous_externes[folds_evalues]
 
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
+        pearson_moyen = np.mean(pearson_tous_les_tests, axis=0)
+        pearson_variance_inter_folds = np.var(pearson_tous_les_tests, axis=0)
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
-        return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
+        return ResultatsCV(
+            r2_moyen=r2_moyen,
+            r2_variance_inter_folds=r2_variance_inter_folds,
+            r2_tous_les_tests=r2_tous_les_tests,
+            alphas_tous_externes=alphas_tous_externes,
+            alphas_tous_externes_moyen=alphas_tous_externes_moyen,
+            TSNR=TSNR,
+            pearson_moyen=pearson_moyen,
+            pearson_variance_inter_folds=pearson_variance_inter_folds,
+            pearson_tous_les_tests=pearson_tous_les_tests,
+        )
 
 if __name__ == "__main__":
     # Point d'entrée : pour chaque sujet, lance les méthodes de validation croisée
@@ -981,7 +1168,7 @@ if __name__ == "__main__":
 
     # --- PARAMÈTRES ---
     plateforme = ["Rorqual", "Mac"]
-    plateforme = plateforme[0]
+    plateforme = plateforme[1]
 
     liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
     liste_sujets = liste_sujets[2:3]
@@ -1027,18 +1214,21 @@ if __name__ == "__main__":
             masque_visuelles_dorsAttn = ridge._charger_masque_parcelles(RESEAUX_PARCELLES_VISUEL_DORSATTN)
             scopes = {
                 "toutes_parcelles": None,
-                #"visuelles": masque_visuelles,
-                #"visuelles_dorsAttn": masque_visuelles_dorsAttn,
+                "visuelles": masque_visuelles,
+                "visuelles_dorsAttn": masque_visuelles_dorsAttn,
             }
 
         # `seed` est fixé pour que les variantes soient comparables entre elles :
         # sans lui le split externe change à chaque exécution.
         methodes = {
-            #"one_cycle": lambda masque: ridge.nested_cross_validation_one_cycle(alphas, masque_roi=masque),
-            "ridgecv_loo_session": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="session", seed=49, masque_roi=masque),
+            # Seule méthode qui produit aussi un score de Pearson (second panneau de la
+            # figure accuracy) : elle n'a pas de `seed`, son découpage est fixé par le
+            # protocole CNeuroMod-THINGS.
+            "one_cycle": lambda masque: ridge.nested_cross_validation_one_cycle(alphas, masque_roi=masque),
+            #"ridgecv_loo_session": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="session", seed=49, masque_roi=masque),
             # test_size=0.1 -> 21 runs de test sur 213, plus 30 à 40 runs de buffer
             # (voisins immédiats), donc un train de 152-158 runs au lieu de 192.
-            "ridgecv_loo_run": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
+            #"ridgecv_loo_run": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
             # Contrôle à activer si l'écart session/run est net : même split par run mais
             # SANS buffer, donc même taille de train qu'au niveau session. L'écart qui
             # subsiste alors ne vient plus du volume de données mais des runs frères de
@@ -1050,11 +1240,54 @@ if __name__ == "__main__":
             #"full_manuel": lambda masque: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
         }
 
-        for nom_scope, masque_roi in scopes.items():
-            for nom_methode, executer in methodes.items():
-                nom_complet = f"{nom_methode}_{nom_scope}"
-                print(f"\n{'-'*60}\n[{nom_complet}] — {SUB}\n{'-'*60}")
-                resultats = executer(masque_roi)
-                figures.generer_toutes_les_figures(nom_complet, resultats, alphas, masque_roi=masque_roi)
+        # Scope sur lequel la CV est RÉELLEMENT calculée. None = tout (cerveau entier
+        # ou toutes les parcelles). Chaque voxel étant régressé indépendamment des
+        # autres, les scopes plus petits se déduisent ensuite par simple sélection de
+        # colonnes : inutile de relancer la CV, les valeurs sont identiques au bit
+        # près (cf. `ResultatsCV.restreindre` et test/test_equivalence_scopes.py).
+        # Le restreindre limite mécaniquement les scopes comparables, qui doivent en
+        # être des sous-ensembles.
+        scope_cv = None
+
+        # Scope qui reçoit la planche détaillée (cartes cérébrales, histogrammes
+        # d'alphas, ROImask). Les autres n'apparaissent que dans la comparaison.
+        scope_detaille = "cerveau_entier" if flag_precision_voxel else "toutes_parcelles"
+
+        for nom_methode, executer in methodes.items():
+            print(f"\n{'-'*60}\n[{nom_methode}] — {SUB}\n{'-'*60}")
+
+            # UNE seule CV par méthode, donc un seul chargement des données : c'est
+            # `_selection_X_Y` -> `create_X_Y_total()` qui domine le temps d'exécution.
+            resultats = executer(scope_cv)
+
+            # 1. Planche détaillée, sur le seul scope désigné.
+            masque_detaille = scopes[scope_detaille]
+            if not scope_disponible(masque_detaille, scope_cv):
+                raise ValueError(
+                    f"scope_detaille={scope_detaille!r} n'est pas inclus dans le scope "
+                    "sur lequel la CV a tourné : impossible d'en tirer une planche."
+                )
+            figures.generer_toutes_les_figures(
+                f"{nom_methode}_{scope_detaille}",
+                resultats.restreindre(masque_relatif(masque_detaille, scope_cv)),
+                alphas,
+                masque_roi=masque_detaille,
+            )
+
+            # 2. Figure de synthèse : tous les scopes comparés, sans aucune CV en plus.
+            r2_par_scope, pearson_par_scope = {}, {}
+            for nom_scope, masque in scopes.items():
+                if not scope_disponible(masque, scope_cv):
+                    print(f"  -> scope {nom_scope} ignoré : hors du scope de CV.")
+                    continue
+                restreints = resultats.restreindre(masque_relatif(masque, scope_cv))
+                r2_par_scope[nom_scope] = restreints.r2_tous_les_tests
+                if restreints.pearson_tous_les_tests is not None:
+                    pearson_par_scope[nom_scope] = restreints.pearson_tous_les_tests
+
+            figures.plot_comparaison_scopes(
+                nom_methode, r2_par_scope, pearson_par_scope or None,
+                suffix=f"_{nom_methode}",
+            )
 
         print(f"\nTerminé pour le sujet {SUB}. Toutes les figures ont été sauvegardées.")

@@ -24,6 +24,12 @@ matplotlib.use('Agg')
 DPI_FIGURES = 300
 SEUIL_AFFICHAGE_BRAIN_MAP = 0.01
 
+# Palette des SCOPES (zones cérébrales comparées). Attention : dans
+# `_tracer_barres_accuracy` la couleur code la MÉTRIQUE, ici elle code le scope —
+# d'où deux palettes disjointes, pour qu'une couleur ne veuille pas dire deux choses
+# d'une figure à l'autre. Suite Okabe-Ito, lisible en daltonisme.
+PALETTE_SCOPES = ("#D55E00", "#CC79A7", "#F0E442", "#0072B2", "#009E73")
+
 
 class VisualisationResultats:
     """Produit et sauvegarde toutes les figures d'une analyse d'encodage, pour un sujet
@@ -268,56 +274,115 @@ class VisualisationResultats:
         plt.close(fig)
         return chemin_sauvegarde
 
-    def plot_accuracy(self, r2_tous_les_tests, suffix=""):
-        """Trace les barres mean/median/top-10% (moyenne ± écart-type inter-folds)
+    def _stats_par_fold(self, scores_par_fold):
+        """Construit le tableau long (une ligne par fold × métrique) attendu par
+        `sns.barplot` pour tracer mean / median / top-10% / max.
+
+        Une valeur PAR FOLD externe (et pas une seule valeur agrégée par métrique) :
+        c'est ce qui permet à `errorbar="sd"` de tracer l'écart-type inter-folds.
+
+        Args :
+            scores_par_fold : scores par fold externe et par voxel/parcelle, shape
+                (n_folds, n_features).
+
+        Returns :
+            pd.DataFrame : colonnes "Métrique" et "Score".
+        """
+        n_folds = scores_par_fold.shape[0]
+
+        means_par_fold = np.mean(scores_par_fold, axis=1)
+        medians_par_fold = np.median(scores_par_fold, axis=1)
+        seuils_top10_par_fold = np.percentile(scores_par_fold, 90, axis=1)
+        top10_par_fold = np.array([
+            np.mean(fold[fold >= seuil])
+            for fold, seuil in zip(scores_par_fold, seuils_top10_par_fold)
+        ])
+        # Le meilleur voxel/parcelle du fold : borne haute de ce que le modèle atteint
+        # là où il marche le mieux, que la moyenne du top-10% lisse déjà.
+        max_par_fold = np.max(scores_par_fold, axis=1)
+
+        return pd.DataFrame({
+            "Métrique": (["mean"] * n_folds + ["median"] * n_folds
+                         + ["top-10% mean"] * n_folds + ["max"] * n_folds),
+            "Score": np.concatenate([means_par_fold, medians_par_fold, top10_par_fold, max_par_fold]),
+        })
+
+    def _tracer_barres_accuracy(self, ax, scores_par_fold, label_y):
+        """Trace un panneau de barres mean/median/top-10%/max sur l'axe donné."""
+        ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
+        ax.set_axisbelow(True)
+
+        df = self._stats_par_fold(scores_par_fold)
+        ordre_metriques = ["mean", "median", "top-10% mean", "max"]
+
+        # Palette Okabe-Ito (sûre pour les daltonismes) : bleu, bleu clair, orange, vert.
+        palette = {"mean": "#0072B2", "median": "#56B4E9", "top-10% mean": "#E69F00", "max": "#009E73"}
+        sns.barplot(
+            data=df, x="Métrique", y="Score", hue="Métrique",
+            palette=palette, ax=ax, errorbar="sd", capsize=0.1, legend=False,
+        )
+
+        # seaborn ne renseigne pas `container.errorbar`, donc `ax.bar_label` collerait
+        # les étiquettes au sommet des barres, par-dessus les moustaches. On les place
+        # nous-mêmes au-dessus de la moustache haute (même écart-type que seaborn,
+        # ddof=1 ; NaN si un seul fold).
+        ecarts = df.groupby("Métrique")["Score"].std().reindex(ordre_metriques).fillna(0.0)
+        for nom_metrique, container in zip(ordre_metriques, ax.containers):
+            barre = container[0]
+            hauteur = barre.get_height()
+            ax.annotate(
+                f"{hauteur:.3f}",
+                xy=(barre.get_x() + barre.get_width() / 2, hauteur + ecarts[nom_metrique]),
+                xytext=(0, 3), textcoords="offset points",
+                ha='center', va='bottom', fontsize=9,
+            )
+        ax.margins(y=0.12)
+
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_xlabel("")
+        ax.set_ylabel(label_y, fontsize=12)
+
+    def plot_accuracy(self, r2_tous_les_tests, pearson_tous_les_tests=None, suffix=""):
+        """Trace les barres mean/median/top-10%/max (moyenne ± écart-type inter-folds)
         pour UN sujet et les enregistre en PNG. Pas d'agrégation multi-sujets : un
         seul appel = un seul sujet, une seule figure.
 
         Args :
             r2_tous_les_tests : R² par fold externe et par voxel/parcelle, shape
                 (n_folds, n_features).
+            pearson_tous_les_tests : corrélations de Pearson au même format, si la
+                méthode de validation croisée en produit (seule `one_cycle`
+                aujourd'hui) ; None = figure à un seul panneau.
             suffix : suffixe ajouté au nom du fichier de sortie.
 
         Returns :
             Path : chemin du fichier PNG sauvegardé.
+
+        Notes :
+            Les deux panneaux ont des échelles indépendantes : le Pearson ignore le
+            biais et l'échelle de la prédiction, donc il est mécaniquement plus haut
+            que le R², et les forcer sur un axe commun écraserait les barres R².
         """
         n_features = r2_tous_les_tests.shape[1]
         n_folds = r2_tous_les_tests.shape[0]
 
-        # Une valeur par fold externe (pas juste par métrique) : nécessaire pour que
-        # errorbar="sd" dans sns.barplot trace l'écart-type inter-folds.
-        means_par_fold = np.mean(r2_tous_les_tests, axis=1)
-        medians_par_fold = np.median(r2_tous_les_tests, axis=1)
-        seuils_top10_par_fold = np.percentile(r2_tous_les_tests, 90, axis=1)
-        top10_par_fold = np.array([
-            np.mean(fold[fold >= seuil])
-            for fold, seuil in zip(r2_tous_les_tests, seuils_top10_par_fold)
-        ])
+        if pearson_tous_les_tests is None:
+            fig, ax = plt.subplots(figsize=(6, 6))
+            self._tracer_barres_accuracy(ax, r2_tous_les_tests, "R² (raw)")
+            # Titre plus petit sur un seul panneau : contrairement à un titre d'axe,
+            # un suptitle n'est pas rétréci par tight_layout et déborderait des 6 pouces.
+            taille_titre = 11
+        else:
+            fig, (ax_r2, ax_pearson) = plt.subplots(1, 2, figsize=(12, 6))
+            self._tracer_barres_accuracy(ax_r2, r2_tous_les_tests, "R² (raw)")
+            self._tracer_barres_accuracy(ax_pearson, pearson_tous_les_tests, "Pearson r")
+            taille_titre = 14
 
-        df = pd.DataFrame({
-            "Métrique": ["mean"] * n_folds + ["median"] * n_folds + ["top-10% mean"] * n_folds,
-            "R2": np.concatenate([means_par_fold, medians_par_fold, top10_par_fold]),
-        })
-
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
-        ax.set_axisbelow(True)
-
-        palette = {"mean": "#0072B2", "median": "#56B4E9", "top-10% mean": "#E69F00"}
-        sns.barplot(
-            data=df, x="Métrique", y="R2", hue="Métrique",
-            palette=palette, ax=ax, errorbar="sd", capsize=0.1, legend=False,
+        fig.suptitle(
+            f"Accuracy — {self.subject} / {self.layer} (n={n_features:,}, {n_folds} folds)",
+            fontsize=taille_titre, fontweight='bold',
         )
-
-        for container in ax.containers:
-            ax.bar_label(container, fmt='%.3f', padding=3, fontsize=10)
-
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.set_xlabel("")
-        ax.set_ylabel("R² (raw)", fontsize=12)
-        ax.set_title(f"Accuracy — {self.subject} / {self.layer} (n={n_features:,}, {n_folds} folds)", fontsize=14, fontweight='bold')
-
         plt.tight_layout()
 
         nom_fichier = f"accuracy_{self.subject}_{self.layer}{suffix}.png"
@@ -325,6 +390,118 @@ class VisualisationResultats:
         plt.close(fig)
         return chemin_sauvegarde
 
+
+    def _tracer_barres_comparaison(self, ax, scores_par_scope, label_y):
+        """Trace un panneau de barres mean/median/top-10%/max groupées par scope."""
+        ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
+        ax.set_axisbelow(True)
+
+        # `_stats_par_fold` est réutilisé tel quel : une ligne par (métrique × fold),
+        # ce qui laisse `errorbar="sd"` calculer l'écart-type inter-folds exactement
+        # comme dans `plot_accuracy`. On n'ajoute que la colonne qui sépare les scopes.
+        frames, etiquettes = [], {}
+        for nom_scope, scores in scores_par_scope.items():
+            df_scope = self._stats_par_fold(scores)
+            # L'effectif est dans la légende : les scopes vont de ~180 à 1134 unités,
+            # et cet écart change la lecture des barres (surtout celle du max).
+            etiquettes[nom_scope] = f"{nom_scope} (n={scores.shape[1]:,})"
+            df_scope["Scope"] = etiquettes[nom_scope]
+            frames.append(df_scope)
+        df = pd.concat(frames, ignore_index=True)
+
+        ordre_metriques = ["mean", "median", "top-10% mean", "max"]
+        ordre_scopes = [etiquettes[nom] for nom in scores_par_scope]
+        palette = {
+            etiquette: PALETTE_SCOPES[i % len(PALETTE_SCOPES)]
+            for i, etiquette in enumerate(ordre_scopes)
+        }
+
+        sns.barplot(
+            data=df, x="Métrique", y="Score", hue="Scope",
+            order=ordre_metriques, hue_order=ordre_scopes,
+            palette=palette, ax=ax, errorbar="sd", capsize=0.06,
+        )
+
+        # Même problème que dans `_tracer_barres_accuracy` : seaborn ne renseigne pas
+        # `container.errorbar`, donc on place les étiquettes au-dessus de la moustache
+        # haute. Différence ici : un container est un SCOPE et contient une barre par
+        # métrique (l'autre helper, avec hue == x, n'en a qu'une), d'où la double
+        # boucle et l'écart-type pris sur le couple (scope, métrique).
+        ecarts = df.groupby(["Scope", "Métrique"])["Score"].std().fillna(0.0)
+        for etiquette, container in zip(ordre_scopes, ax.containers):
+            for nom_metrique, barre in zip(ordre_metriques, container):
+                hauteur = barre.get_height()
+                ax.annotate(
+                    f"{hauteur:.3f}",
+                    xy=(barre.get_x() + barre.get_width() / 2,
+                        hauteur + ecarts[(etiquette, nom_metrique)]),
+                    xytext=(0, 3), textcoords="offset points",
+                    ha='center', va='bottom', fontsize=7, rotation=90,
+                )
+        # Plus de marge que sur la figure à un scope : les étiquettes sont verticales.
+        ax.margins(y=0.22)
+
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_xlabel("")
+        ax.set_ylabel(label_y, fontsize=12)
+        ax.legend(title="", fontsize=9, frameon=False)
+
+    def plot_comparaison_scopes(self, nom_methode, r2_par_scope, pearson_par_scope=None, suffix=""):
+        """Compare les zones cérébrales analysées dans UNE figure, pour une méthode.
+
+        Remplace les planches séparées par scope : mêmes métriques que `plot_accuracy`,
+        mais une couleur par scope au lieu d'une figure par scope. Les scopes n'étant
+        que des sous-ensembles de colonnes d'une même CV, les valeurs affichées sont
+        celles d'un unique passage (cf. `ResultatsCV.restreindre`).
+
+        Args :
+            nom_methode : nom de la méthode de validation croisée (titre de la figure).
+            r2_par_scope : {nom du scope: R² par fold, shape (n_folds, n_features)}.
+                Le nombre de features diffère d'un scope à l'autre, c'est attendu.
+            pearson_par_scope : mêmes clés, corrélations de Pearson, si la méthode en
+                produit (`one_cycle` seule) ; None = figure à un seul panneau.
+            suffix : suffixe ajouté au nom du fichier de sortie.
+
+        Returns :
+            Path | None : chemin du PNG sauvegardé, ou None si aucun scope à comparer.
+
+        Notes :
+            - `max` est la seule des quatre barres qui ne se compare pas à effectif
+              égal : un grand scope contient les unités d'un petit, donc son maximum
+              lui est mécaniquement supérieur ou égal. Les trois autres sont des
+              moyennes, insensibles à l'effectif.
+            - Échelles indépendantes entre les deux panneaux, pour la raison déjà
+              documentée dans `plot_accuracy`.
+        """
+        if not r2_par_scope:
+            print(f"Aucun scope à comparer pour {nom_methode}.")
+            return None
+
+        n_folds = next(iter(r2_par_scope.values())).shape[0]
+
+        if pearson_par_scope is None:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            self._tracer_barres_comparaison(ax, r2_par_scope, "R² (raw)")
+            taille_titre = 11
+        else:
+            fig, (ax_r2, ax_pearson) = plt.subplots(1, 2, figsize=(15, 6))
+            self._tracer_barres_comparaison(ax_r2, r2_par_scope, "R² (raw)")
+            self._tracer_barres_comparaison(ax_pearson, pearson_par_scope, "Pearson r")
+            taille_titre = 14
+
+        unite = "voxels analysés" if self.flag_precision_voxel else "parcelles analysées"
+        fig.suptitle(
+            f"Comparaison des {unite} — {nom_methode} — "
+            f"{self.subject} / {self.layer} ({n_folds} folds)",
+            fontsize=taille_titre, fontweight='bold',
+        )
+        plt.tight_layout()
+
+        nom_fichier = f"comparaison_scopes_{self.subject}_{self.layer}{suffix}.png"
+        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Comparaison des scopes sauvegardée")
+        plt.close(fig)
+        return chemin_sauvegarde
 
     def plot_alphas_histogram(self, alphas_fold, grille_alphas, alphas_finaux=None, titre=None, suffix=""):
         """Trace la distribution (log10) des alphas sélectionnés et l'enregistre en PNG.
@@ -587,10 +764,12 @@ class VisualisationResultats:
 
         Args :
             nom_methode : nom de la méthode (utilisé dans les noms de fichiers).
-            resultats : tuple renvoyé par la méthode `nested_cross_validation_*`
-                correspondante — 7 éléments pour `nested_cross_validation_full_manuel`
-                (avec `best_alphas_inner`, diagnostic de sous-CV interne LOGO absent
-                des deux autres méthodes), 6 éléments sinon.
+            resultats : objet renvoyé par la méthode `nested_cross_validation_*`
+                correspondante (une `ResultatsCV`, cf. `RidgeRegression`). Ses champs
+                sont lus par attribut, sans import : la dépendance reste à sens unique.
+                Les champs optionnels (`best_alphas_inner` pour `full_manuel`, les
+                champs Pearson pour `one_cycle`) valent None ailleurs, et les figures
+                correspondantes sont alors simplement sautées.
             grille_alphas : grille d'alphas testée (transmise aux histogrammes).
             noms_parcelles : transmis à `brain_mapping_r2`/`print_scores`.
             masque_roi : vecteur booléen par voxel ; si fourni, les cartes cérébrales
@@ -599,20 +778,25 @@ class VisualisationResultats:
                 sauté puisque l'analyse est déjà restreinte à une ROI.
 
         Returns :
-            dict : résumé ("r2_moyen", "r2_tous_les_tests", "alphas_moyens")
-                réutilisable pour comparer les méthodes entre elles dans `__main__`.
+            dict : résumé ("r2_moyen", "r2_tous_les_tests", "alphas_moyens",
+                "pearson_moyen") réutilisable pour comparer les méthodes entre elles
+                dans `__main__`.
         """
-        if len(resultats) == 7:
-            r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, _, best_alphas_inner, tsnr = resultats
-        else:
-            r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, _, tsnr = resultats
-            best_alphas_inner = None
+        r2_moyen = resultats.r2_moyen
+        r2_variance_inter_folds = resultats.r2_variance_inter_folds
+        r2_tous_les_tests = resultats.r2_tous_les_tests
+        alphas_tous_externes = resultats.alphas_tous_externes
+        best_alphas_inner = resultats.best_alphas_inner
+        pearson_tous_les_tests = resultats.pearson_tous_les_tests
+        tsnr = resultats.TSNR
 
         suffix = f"_{nom_methode}"
         # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
         alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
 
         print(f"\n[FIGURES] {nom_methode} — Variance inter-folds moyenne : {np.mean(r2_variance_inter_folds):.6f}")
+        if resultats.pearson_moyen is not None:
+            print(f"[FIGURES] {nom_methode} — Pearson moyen : {np.mean(resultats.pearson_moyen):.4f}")
 
         # Liste explicite des chemins de chaque figure produite pour cette méthode :
         # elle sert ensuite à assembler toutes ces figures dans une seule planche.
@@ -654,9 +838,12 @@ class VisualisationResultats:
         else:
             print(f"  -> Pas d'alphas internes pour {nom_methode} (pas de sous-CV interne).")
 
-        # 6. courbe d'accuracy (single-subject), distributionr2 et r2 treshold
+        # 6. courbe d'accuracy (single-subject), distributionr2 et r2 treshold.
+        # Le Pearson, quand la méthode en produit, s'affiche en second panneau de la
+        # figure accuracy — pas en carte cérébrale : il dessinerait la même topographie
+        # que le R², sur une échelle différente.
         print(" -> Accuracy et distribution R²...")
-        chemin_figure = self.plot_accuracy(r2_tous_les_tests, suffix=suffix)
+        chemin_figure = self.plot_accuracy(r2_tous_les_tests, pearson_tous_les_tests=pearson_tous_les_tests, suffix=suffix)
         liste_chemins_figures.append(chemin_figure)
 
         chemin_figure = self.plot_r2_distribution(r2_tous_les_tests, suffix=suffix)
@@ -691,4 +878,5 @@ class VisualisationResultats:
             "r2_moyen": r2_moyen,
             "r2_tous_les_tests": r2_tous_les_tests,
             "alphas_moyens": alphas_moyens,
+            "pearson_moyen": resultats.pearson_moyen,
         }
