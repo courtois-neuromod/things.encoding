@@ -126,11 +126,16 @@ class RidgeRegression:
         if plateforme == "Rorqual":
             ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
             ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
+            # Le dossier des sorties TRIBE ne porte pas le même nom des deux côtés :
+            # "hdf5" sur le cluster, "features" en local. Seul écart de chemin entre
+            # les deux plateformes, tout le reste se déduit des racines ci-dessus.
+            dossier_features = "hdf5"
         else:
             ROOT_ENCODING = Path(__file__).parent.parent
             ROOT_TIMESERIES = ROOT_ENCODING / "data"
+            dossier_features = "features"
 
-        chemin_tribe = ROOT_ENCODING / "output" / "features" / "things_encoding" / f"{self.subject}.h5"
+        chemin_tribe = ROOT_ENCODING / "output" / dossier_features / "things_encoding" / f"{self.subject}.h5"
         chemin_ROImask = ROOT_ENCODING / "data" / "brain_map_subj" / f"{self.subject}_space-T1w_desc-ROImasks_voxelAnnotations.h5"
 
         chemin_annotations_parcelles = ROOT_ENCODING / "data" / "brain_map_subj" / NOM_FICHIER_ANNOTATIONS_PARCELLES
@@ -976,7 +981,7 @@ if __name__ == "__main__":
 
     # --- PARAMÈTRES ---
     plateforme = ["Rorqual", "Mac"]
-    plateforme = plateforme[1]
+    plateforme = plateforme[0]
 
     liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
     liste_sujets = liste_sujets[2:3]
