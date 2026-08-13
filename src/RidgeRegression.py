@@ -1,4 +1,5 @@
-"""Régression Ridge pour l'encodage cérébral THINGS memory.
+"""
+Régression Ridge pour l'encodage cérébral THINGS memory.
 
 Entraîne une Ridge (grille d'alphas balayée manuellement) par couche et
 évalue la prédiction via trois variantes de validation croisée imbriquée.
@@ -25,6 +26,7 @@ from sklearn.model_selection import LeaveOneGroupOut, LeaveOneOut
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from GroupShuffleSplitRun import GroupShuffleSplitRun
 from GroupShuffleSplitSession import GroupShuffleSplitSession
 from litcoder_folding import create_chunked_folds_trimmed
 from TribeHDF5Normalization import TribeHDF5Normalization
@@ -34,7 +36,7 @@ warnings.filterwarnings(action='ignore', category=LinAlgWarning)
 
 # Idem pour les débordements numpy (divide/overflow/invalid) rencontrés lors des
 # fits Ridge avec les plus grands alphas de la grille (jusqu'à 1e10) : ils produisent
-# potentiellement des coefficients NaN/Inf pour CES alphas précis, mais n'empêchent
+# potentiellement des coefficients NaN/Inf pour ces alphas précis, mais n'empêchent
 # pas la sélection de l'alpha optimal (leur R² correspondant devient alors très
 # négatif ou NaN, donc jamais retenu par argmax).
 np.seterr(divide='ignore', over='ignore', invalid='ignore')
@@ -106,7 +108,7 @@ class RidgeRegression:
             flag_delai_bold_brute : voir `TribeHDF5Normalization`.
             centrage_donne_temps : voir `TribeHDF5Normalization`.
             flag_precision_voxel : True = timeseries voxelwise, False = parcelles.
-            ROImask_flag : non utilisé pour l'instant (réservé).
+            ROImask_flag : Afficher plot ROImask.
             randomize_flag : si True, permute aléatoirement l'ordre des runs de Y
                 (baseline de randomisation).
         """
@@ -331,6 +333,33 @@ class RidgeRegression:
             TSNR = TSNR[masque_roi]
         return X, Y, groupes, TSNR
 
+    def _splitter_externe(self, niveau_split, groupes, n_folds, test_size, seed, n_buffer=1):
+        """Choisit le splitter de la boucle EXTERNE et le tableau de groupes associé.
+
+        Args :
+            niveau_split : "session" (tirage de sessions entières) ou "run" (LORO
+                aléatoire). Aucun des deux ne domine l'autre : la session est plus
+                stricte sur les confusions à l'échelle du jour, le run supprime la
+                contiguïté temporelle immédiate mais laisse les runs frères de la
+                session testée en train (cf. docstring de `GroupShuffleSplitRun`).
+            groupes : numéro de session par échantillon (utilisé si "session").
+            n_folds, test_size, seed : passés tels quels au splitter.
+            n_buffer : nombre de runs écartés de part et d'autre de chaque run de
+                test ; ignoré si niveau_split="session". n_buffer=0 conserve la
+                taille de train du niveau session, ce qui isole l'effet « runs
+                frères » de l'effet « moins de données ».
+
+        Returns :
+            tuple : (splitter, groupes_du_split) à donner à `splitter.split(...)`.
+        """
+        if niveau_split == "run":
+            splitter = GroupShuffleSplitRun(n_splits=n_folds, test_size=test_size, random_state=seed, n_buffer=n_buffer)
+            return splitter, self._runs_par_echantillon
+        if niveau_split == "session":
+            splitter = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
+            return splitter, groupes
+        raise ValueError(f"niveau_split inconnu : {niveau_split!r} (attendu 'session' ou 'run')")
+
     def _plages_contigues(self, positions):
         """Condense une liste de positions (int) triables en plages contiguës
         (ex. [0,1,2,3,10,11] -> ["0-3", "10-11"]), pour un affichage résumé au lieu
@@ -504,15 +533,17 @@ class RidgeRegression:
         pleines[masque_roi] = valeurs
         return pleines
 
-    def nested_cross_validation_full_manuel(self, grille_alphas, n_folds=5, test_size=0.2, seed=None, masque_roi=None):
+    def nested_cross_validation_full_manuel(self, grille_alphas, n_folds=5, test_size=0.2, niveau_split="session", seed=None, masque_roi=None):
         """Validation croisée imbriquée 100% manuelle : sélection d'alpha par voxel/
         parcelle via `LeaveOneGroupOut` (une session isolée à la fois) et refit
         explicite d'un `Ridge` pour chaque alpha de la grille sur chaque fold interne.
 
         Args :
             grille_alphas : valeurs d'alpha à tester.
-            n_folds : nombre de folds externes (GroupShuffleSplitSession).
-            test_size : proportion de sessions dans le test externe de chaque fold.
+            n_folds : nombre de folds externes.
+            test_size : part du test externe de chaque fold, exprimée dans l'unité de
+                `niveau_split` (proportion si float, nombre de groupes si int).
+            niveau_split : "session" ou "run", cf. `_splitter_externe`.
             seed : graine du split externe.
             masque_roi : vecteur booléen par voxel (cf. `_charger_masque_roi`) pour
                 restreindre l'analyse à une ROI ; None = cerveau entier.
@@ -525,27 +556,32 @@ class RidgeRegression:
         Notes :
             - Jumeau de `nested_cross_validation_ridgecv_loo` : même split externe et
               même principe (un alpha par voxel), mais boucle interne manuelle (LOGO)
-              plutôt que LOO analytique 
+              plutôt que LOO analytique
             - La sélection d'alpha utilise un R² poolé (résidus accumulés sur tous les
               folds internes puis un seul calcul de R², jamais une moyenne de R² par
               fold), pour reproduire exactement le mécanisme de `RidgeCV(cv=None)`.
+            - `niveau_split` ne change QUE la boucle externe : la boucle interne reste
+              un `LeaveOneGroupOut` par session, quelle que soit la valeur choisie.
         """
         X, Y, groupes, TSNR = self._selection_X_Y(masque_roi=masque_roi)
         n_features = Y.shape[1]
 
         # 1. Définition du splitter externe
-        outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
+        outer_cv, groupes_split = self._splitter_externe(niveau_split, groupes, n_folds, test_size, seed)
 
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
         best_alphas_inner_toutes_folds = []
 
         # 2. BOUCLE EXTERNE : Évaluation de la stabilité du modèle
-        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes)):
+        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes_split)):
             print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
 
             X_train, Y_train, groupes_train = X[train_idx], Y[train_idx], groupes[train_idx]
             X_test, Y_test = X[test_idx], Y[test_idx]
+
+            print(f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples")
+            self._afficher_composition_runs(groupes, self._runs_par_echantillon, train_idx, test_idx)
 
             inner_cv = LeaveOneGroupOut()
             inner_splits = list(inner_cv.split(X_train, Y_train, groups=groupes_train))
@@ -624,7 +660,7 @@ class RidgeRegression:
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, best_alphas_inner, TSNR
 
-    def nested_cross_validation_ridgecv_loo(self, grille_alphas, n_folds=5, test_size=0.2, seed=None, masque_roi=None):
+    def nested_cross_validation_ridgecv_loo(self, grille_alphas, n_folds=5, test_size=0.2, niveau_split="session", n_buffer=1, seed=None, masque_roi=None):
         """Jumeau sklearn-natif de `nested_cross_validation_full_manuel` : remplace la
         boucle interne manuelle (LeaveOneGroupOut + refit d'un Ridge par alpha) par
         `RidgeCV(cv=None)`, qui sélectionne l'alpha via un Leave-One-Out calculé
@@ -632,8 +668,12 @@ class RidgeRegression:
 
         Args :
             grille_alphas : valeurs d'alpha à tester.
-            n_folds : nombre de folds externes (GroupShuffleSplitSession).
-            test_size : proportion de sessions dans le test externe de chaque fold.
+            n_folds : nombre de folds externes.
+            test_size : part du test externe de chaque fold, exprimée dans l'unité de
+                `niveau_split` (proportion si float, nombre de groupes si int).
+            niveau_split : "session" ou "run", cf. `_splitter_externe`.
+            n_buffer : runs écartés de part et d'autre du test si niveau_split="run"
+                (0 = aucun buffer), cf. `_splitter_externe`.
             seed : graine du split externe.
             masque_roi : vecteur booléen par voxel (cf. `_charger_masque_roi`) pour
                 restreindre l'analyse à une ROI ; None = cerveau entier.
@@ -653,16 +693,19 @@ class RidgeRegression:
         X, Y, groupes, TSNR = self._selection_X_Y(masque_roi=masque_roi)
         n_features = Y.shape[1]
 
-        outer_cv = GroupShuffleSplitSession(n_splits=n_folds, test_size=test_size, random_state=seed)
+        outer_cv, groupes_split = self._splitter_externe(niveau_split, groupes, n_folds, test_size, seed, n_buffer=n_buffer)
 
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
 
-        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes)):
+        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes_split)):
             print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
 
             X_train, Y_train = X[train_idx], Y[train_idx]
             X_test, Y_test = X[test_idx], Y[test_idx]
+
+            print(f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples")
+            self._afficher_composition_runs(groupes, self._runs_par_echantillon, train_idx, test_idx)
 
             # alpha_per_target=True : un alpha par voxel, uniquement compatible avec cv=None (LOO).
             # TransformedTargetRegressor standardise/dé-standardise Y automatiquement.
@@ -695,19 +738,25 @@ class RidgeRegression:
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
 
-    def nested_cross_validation_chunked_trimmed_ridgecv_loo(self, grille_alphas, n_folds=5, chunk_length=190, trim_size=5, seed=None, masque_roi=None):
+    def nested_cross_validation_chunked_trimmed_ridgecv_loo(self, grille_alphas, n_folds=5, chunk_length=None, trim_size=5, seed=None, masque_roi=None):
         """Jumeau de `nested_cross_validation_ridgecv_loo` : même boucle interne
         (`RidgeCV(cv=None)`, alpha par voxel via LOO analytique), mais split externe
         remplacé par `create_chunked_folds_trimmed` (litcoder_core, voir
         `src/litcoder_folding.py`) au lieu de `GroupShuffleSplitSession`.
 
+        Contrairement au splitter à tirage aléatoire, ce découpage est une PARTITION :
+        chaque chunk est en test exactement une fois sur les `n_folds` folds.
+
         Args :
             grille_alphas : valeurs d'alpha à tester.
             n_folds : nombre de folds externes.
-            chunk_length : taille des chunks (en TR) découpés dans X/Y avant tirage.
-                DOIT être un multiple de la longueur d'un run (190 TR pour things,
-                cf. test/test_litcoder_folding.py) sous peine de couper des runs
-                entre train et test (fuite temporelle)
+            chunk_length : taille des chunks en TR. Laisser à None (défaut) pour
+                découper sur les RUNS réels via `runs=self._runs_par_echantillon` :
+                aucun run n'est alors coupé entre train et test, quelle que soit sa
+                longueur après alignement. Une valeur explicite rebascule sur le
+                découpage positionnel de litcoder, qui n'évite la coupure que si tous
+                les runs font exactement `chunk_length` TR — un seul run plus court
+                décale tous les chunks suivants.
             trim_size : nombre de TR retirés aux deux bords de chaque chunk de test
                 (réduction de la fuite par autocorrélation), le chunk de train
                 correspondant reste entier.
@@ -720,8 +769,8 @@ class RidgeRegression:
                 alphas_tous_externes, alphas_tous_externes_moyen, TSNR).
 
         Notes :
-            Contrairement à `GroupShuffleSplitSession`, `create_chunked_folds_trimmed`
-            ne retire pas du train les chunks adjacents aux chunks de test : seul le
+            Contrairement à `GroupShuffleSplitRun`, `create_chunked_folds_trimmed` ne
+            retire pas du train les chunks adjacents aux chunks de test : seul le
             trimming interne aux chunks de test protège contre l'autocorrélation.
         """
         X, Y, groupes, TSNR = self._selection_X_Y(masque_roi=masque_roi)
@@ -730,7 +779,8 @@ class RidgeRegression:
 
         rng = np.random.default_rng(seed)
         folds = create_chunked_folds_trimmed(
-            n_samples, n_folds, chunk_length, trim_size=trim_size, shuffle=True, rng=rng
+            n_samples, n_folds, chunk_length, trim_size=trim_size, shuffle=True, rng=rng,
+            runs=self._runs_par_echantillon if chunk_length is None else None,
         )
 
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
@@ -745,7 +795,7 @@ class RidgeRegression:
             
             print(f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples")
             self._afficher_composition_runs(groupes, self._runs_par_echantillon, train_idx, test_idx)
-            """
+
             # alpha_per_target=True : un alpha par voxel, uniquement compatible avec cv=None (LOO).
             # TransformedTargetRegressor standardise/dé-standardise Y automatiquement.
             modele = TransformedTargetRegressor(
@@ -776,7 +826,7 @@ class RidgeRegression:
         alphas_tous_externes_moyen = np.mean(alphas_tous_externes, axis=0)
 
         return r2_moyen, r2_variance_inter_folds, r2_tous_les_tests, alphas_tous_externes, alphas_tous_externes_moyen, TSNR
-        """
+
     def _generer_folds_one_cycle(self):
         """Construit les folds Train/Validation/Test/Buffer du protocole 'one cycle'
         (sessions numérotées 1..36).
@@ -1566,16 +1616,27 @@ if __name__ == "__main__":
             masque_visuelles_dorsAttn = ridge._charger_masque_parcelles(RESEAUX_PARCELLES_VISUEL_DORSATTN)
             scopes = {
                 "toutes_parcelles": None,
-                "visuelles": masque_visuelles,
-                "visuelles_dorsAttn": masque_visuelles_dorsAttn,
+                #"visuelles": masque_visuelles,
+                #"visuelles_dorsAttn": masque_visuelles_dorsAttn,
             }
 
+        # `seed` est fixé pour que les variantes soient comparables entre elles :
+        # sans lui le split externe change à chaque exécution.
         methodes = {
             #"one_cycle": lambda masque: ridge.nested_cross_validation_one_cycle(alphas, masque_roi=masque),
-            "ridgecv_loo": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, masque_roi=masque),
-            #"chunked_trimmed_ridgecv_loo": lambda masque: ridge.nested_cross_validation_chunked_trimmed_ridgecv_loo(alphas, n_folds=10, chunk_length=180, seed=49, masque_roi=masque)
+            "ridgecv_loo_session": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="session", seed=49, masque_roi=masque),
+            # test_size=0.1 -> 21 runs de test sur 213, plus 30 à 40 runs de buffer
+            # (voisins immédiats), donc un train de 152-158 runs au lieu de 192.
+            "ridgecv_loo_run": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
+            # Contrôle à activer si l'écart session/run est net : même split par run mais
+            # SANS buffer, donc même taille de train qu'au niveau session. L'écart qui
+            # subsiste alors ne vient plus du volume de données mais des runs frères de
+            # la session testée restés en train (cf. docstring de GroupShuffleSplitRun).
+            #"ridgecv_loo_run_sans_buffer": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="run", n_buffer=0, seed=49, masque_roi=masque),
+            # chunk_length=None -> chunks = runs réels (partition : chaque run testé une fois)
+            #"chunked_trimmed_ridgecv_loo": lambda masque: ridge.nested_cross_validation_chunked_trimmed_ridgecv_loo(alphas, n_folds=10, trim_size=5, seed=49, masque_roi=masque),
             # Coûteux (triple boucle folds × sessions internes × alphas, pas de raccourci
-            #"full_manuel": lambda masque: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1, masque_roi=masque),
+            #"full_manuel": lambda masque: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
         }
 
         for nom_scope, masque_roi in scopes.items():
