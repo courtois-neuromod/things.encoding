@@ -46,8 +46,9 @@ class GroupShuffleSplitRun:
     échantillons (`len(train_idx) + len(test_idx) < n_samples`).
     """
 
-    def __init__(self, n_splits=5, test_size=0.2, train_size=None, random_state=None,
-                 n_buffer=1):
+    def __init__(
+        self, n_splits=5, test_size=0.2, train_size=None, random_state=None, n_buffer=1
+    ):
         self.n_splits = n_splits
         self.random_state = random_state
         self.test_size = test_size
@@ -101,7 +102,7 @@ class GroupShuffleSplitRun:
         for i_fold in range(self.n_splits):
             shuffled = rng.permutation(runs_uniques)
             test_runs = shuffled[:nb_test]
-            train_runs_raw = shuffled[nb_test:nb_test + nb_train]
+            train_runs_raw = shuffled[nb_test : nb_test + nb_train]
 
             # Voisins à +/- n_buffer de chaque run de test, dans l'ordre d'acquisition.
             adjacents = set()

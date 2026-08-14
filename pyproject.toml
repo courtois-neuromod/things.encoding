@@ -1,10 +1,14 @@
-[project]
-name = "things-encoding"
-version = "0.1.0"
-description = "Extraction de représentations latentes TRIBE v2 sur les vidéos THINGS"
-readme = "README.md"
-requires-python = ">=3.12,<3.13"
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
 
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.2",
+    "ruff>=0.16.3"
+]
+
+[project]
 dependencies = [
     "tribev2 @ git+https://github.com/facebookresearch/tribev2.git",
     "exca>=0.5.20,<0.5.24",
@@ -27,34 +31,72 @@ dependencies = [
     "plotly-express>=0.4.1",
     "kaleido==1.3.0",
     "seaborn>=0.13.2",
-    "whisperx>=3.4.5",
+    "whisperx>=3.4.5"
 ]
-
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+description = "Extraction de représentations latentes TRIBE v2 sur les vidéos THINGS"
+name = "things-encoding"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+version = "0.1.0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/things_encoding"]
 
-[[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.ruff]
+include = ["pyproject.toml", "src/**/*.py", "test/**/*.py"]
+indent-width = 4
+line-length = 88
+# `src/` est plat et sans __init__.py : sans cette clé, isort classerait
+# `from Config import Config` en bibliothèque tierce et casserait l'ordre des imports.
+src = ["src", "test"]
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+indent-style = "space"
+line-ending = "auto"
+quote-style = "double"
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+fixable = ["ALL"]
+# Le formateur possède la longueur de ligne ; E501 ne se déclencherait plus que sur ce
+# qu'il ne peut pas couper (URLs de commit dans les commentaires, longs noms de fichiers).
+ignore = ["E501"]
+select = [
+    "E",  # pycodestyle
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "UP"  # pyupgrade
+]
+
+[tool.ruff.lint.per-file-ignores]
+# `SCIPY_ARRAY_API` et `PYTORCH_ENABLE_MPS_FALLBACK` doivent être posées AVANT l'import
+# de scipy/sklearn/torch, donc avant le bloc d'imports. Cf. l'en-tête du fichier.
+"src/RidgeRegression.py" = ["E402"]
+# Scripts de diagnostic : `sys.path.insert` doit précéder les imports du projet.
+"test/*.py" = ["E402"]
 
 [tool.uv]
 environments = [
     "sys_platform == 'linux'",
-    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'"
 ]
+
+[[tool.uv.index]]
+explicit = true
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu124"
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch", marker = "sys_platform == 'linux'" },
+    {index = "pytorch", marker = "sys_platform == 'linux'"}
 ]
 torchaudio = [
-    { index = "pytorch", marker = "sys_platform == 'linux'" },
+    {index = "pytorch", marker = "sys_platform == 'linux'"}
 ]

@@ -12,7 +12,6 @@ Unique ajout du projet : le paramètre optionnel `runs` de
 que sur des blocs de N échantillons. Sans ce paramètre, le comportement reste
 strictement celui de la source (les autres fonctions ne sont pas modifiées).
 """
-from typing import List, Optional, Tuple
 
 import numpy as np
 from sklearn.model_selection import GroupKFold, KFold, TimeSeriesSplit
@@ -22,23 +21,35 @@ def create_folds(
     n_samples: int,
     fold_type: str,
     n_folds: int,
-    chunk_length: Optional[int] = None,
-    trim_size: Optional[int] = None,
-    groups: Optional[np.ndarray] = None,
-    rng: Optional[np.random.Generator] = None,
-    runs: Optional[np.ndarray] = None,
-) -> List[Tuple[List[int], List[int]]]:
+    chunk_length: int | None = None,
+    trim_size: int | None = None,
+    groups: np.ndarray | None = None,
+    rng: np.random.Generator | None = None,
+    runs: np.ndarray | None = None,
+) -> list[tuple[list[int], list[int]]]:
     """Voir folding.py original. `rng` remplace le `random` global du module source ;
     `runs` est l'ajout du projet, transmis à `create_chunked_folds_trimmed` (ignoré
     par les autres types de folding)."""
     if fold_type == "chunked":
-        return create_chunked_folds(n_samples, n_folds, chunk_length, shuffle=True, rng=rng)
+        return create_chunked_folds(
+            n_samples, n_folds, chunk_length, shuffle=True, rng=rng
+        )
     elif fold_type == "chunked_trimmed":
         if trim_size is None:
             trim_size = 5
-        return create_chunked_folds_trimmed(n_samples, n_folds, chunk_length, trim_size, shuffle=True, rng=rng, runs=runs)
+        return create_chunked_folds_trimmed(
+            n_samples,
+            n_folds,
+            chunk_length,
+            trim_size,
+            shuffle=True,
+            rng=rng,
+            runs=runs,
+        )
     elif fold_type == "chunked_contiguous":
-        return create_chunked_folds(n_samples, n_folds, chunk_length, shuffle=False, rng=rng)
+        return create_chunked_folds(
+            n_samples, n_folds, chunk_length, shuffle=False, rng=rng
+        )
     elif fold_type == "kfold":
         kf = KFold(n_splits=n_folds, shuffle=False)
         return list(kf.split(range(n_samples)))
@@ -59,9 +70,12 @@ def create_folds(
 
 
 def create_chunked_folds(
-    n_samples: int, n_folds: int, chunk_length: int, shuffle: bool = True,
-    rng: Optional[np.random.Generator] = None,
-) -> List[Tuple[List[int], List[int]]]:
+    n_samples: int,
+    n_folds: int,
+    chunk_length: int,
+    shuffle: bool = True,
+    rng: np.random.Generator | None = None,
+) -> list[tuple[list[int], list[int]]]:
     n_complete_chunks = n_samples // chunk_length
     chunk_indices = list(range(n_complete_chunks))
 
@@ -98,7 +112,7 @@ def create_chunked_folds(
     return splits
 
 
-def _bornes_des_runs(runs: np.ndarray) -> List[Tuple[int, int]]:
+def _bornes_des_runs(runs: np.ndarray) -> list[tuple[int, int]]:
     """Délimite les runs contigus d'un tableau d'identifiants par échantillon
     (ex. ["ses-001/run-1", "ses-001/run-1", ..., "ses-001/run-2", ...]).
 
@@ -113,18 +127,18 @@ def _bornes_des_runs(runs: np.ndarray) -> List[Tuple[int, int]]:
     ruptures = np.where(runs[1:] != runs[:-1])[0] + 1
     debuts = np.concatenate(([0], ruptures))
     fins = np.concatenate((ruptures, [len(runs)]))
-    return [(int(d), int(f)) for d, f in zip(debuts, fins)]
+    return [(int(d), int(f)) for d, f in zip(debuts, fins, strict=True)]
 
 
 def create_chunked_folds_trimmed(
     n_samples: int,
     n_folds: int,
-    chunk_length: Optional[int] = None,
+    chunk_length: int | None = None,
     trim_size: int = 5,
     shuffle: bool = True,
-    rng: Optional[np.random.Generator] = None,
-    runs: Optional[np.ndarray] = None,
-) -> List[Tuple[List[int], List[int]]]:
+    rng: np.random.Generator | None = None,
+    runs: np.ndarray | None = None,
+) -> list[tuple[list[int], list[int]]]:
     """Découpe la timeline concaténée en chunks, en teste un sous-ensemble par fold
     (partition : chaque chunk est en test exactement une fois), et rogne `trim_size`
     échantillons aux deux bords de chaque chunk de TEST (les chunks de train restent
@@ -208,7 +222,7 @@ def create_kfold_trimmed(
     n_samples: int,
     n_folds: int,
     trim_size: int = 5,
-) -> List[Tuple[List[int], List[int]]]:
+) -> list[tuple[list[int], list[int]]]:
     kf = KFold(n_splits=n_folds, shuffle=False)
     base_splits = list(kf.split(range(n_samples)))
 

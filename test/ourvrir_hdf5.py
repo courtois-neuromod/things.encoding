@@ -1,7 +1,6 @@
-import sys
-import h5py
-import numpy as np
 from pathlib import Path
+
+import h5py
 
 
 def explorer_hdf5(chemin: Path) -> None:
@@ -9,16 +8,16 @@ def explorer_hdf5(chemin: Path) -> None:
         print(f"[Erreur] Fichier introuvable : {chemin}")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f" {chemin.name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
-    with h5py.File(chemin, 'r') as f:
+    with h5py.File(chemin, "r") as f:
 
         def afficher(nom, objet):
-            profondeur = nom.count('/')
+            profondeur = nom.count("/")
             indent = "    " * profondeur
-            nom_court = nom.split('/')[-1]
+            nom_court = nom.split("/")[-1]
 
             if isinstance(objet, h5py.Group):
                 print(f"{indent}📁 {nom_court}/  ({len(objet)} éléments)")
@@ -43,10 +42,11 @@ def explorer_hdf5(chemin: Path) -> None:
 
         f.visititems(afficher)
 
-    print(f"\n{'='*60}\n")
+    print(f"\n{'=' * 60}\n")
 
 
-if __name__ == '__main__':
-
-    chemin = Path("../data/brain_map_subj/sub-01_space-T1w_desc-ROImasks_voxelAnnotations.h5")
+if __name__ == "__main__":
+    chemin = Path(
+        "../data/brain_map_subj/sub-01_space-T1w_desc-ROImasks_voxelAnnotations.h5"
+    )
     explorer_hdf5(chemin)

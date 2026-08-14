@@ -7,22 +7,23 @@ histogrammes, planche PNG récapitulative).
 Elle n'importe rien de `RidgeRegression` — les chemins lui sont donnés à la construction
 sous la forme d'un objet `CheminsProjet` déjà bâti. La dépendance est donc à sens unique.
 """
-from pathlib import Path
+
 import textwrap
+from pathlib import Path
 
 import h5py
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
-from matplotlib.ticker import FuncFormatter
-from PIL import Image
-from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
-from nilearn.plotting import plot_stat_map
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.patches import Patch
+from matplotlib.ticker import FuncFormatter
+from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
+from nilearn.plotting import plot_stat_map
+from PIL import Image
 
-matplotlib.use('Agg')
+matplotlib.use("Agg")
 
 DPI_FIGURES = 300
 SEUIL_AFFICHAGE_BRAIN_MAP = 0.01
@@ -98,7 +99,9 @@ class VisualisationResultats:
         self.layer = layer
         self.flag_precision_voxel = flag_precision_voxel
 
-    def _sauvegarder_figure(self, figure_sauvegardable, nom_fichier, message, **kwargs_savefig):
+    def _sauvegarder_figure(
+        self, figure_sauvegardable, nom_fichier, message, **kwargs_savefig
+    ):
         """Sauvegarde une figure (matplotlib Figure ou display Nilearn) dans output/.
 
         Args :
@@ -124,17 +127,19 @@ class VisualisationResultats:
             scores_finaux : R² par voxel/parcelle.
             noms_parcelles : noms à afficher pour le voxel/parcelle max (sinon son index).
         """
-        unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
+        unite = "voxel" if self.flag_precision_voxel else "parcelle"
         index_max = np.argmax(scores_finaux)
         label_max = index_max if noms_parcelles is None else noms_parcelles[index_max]
 
-        print(f"\n=========================================")
+        print("\n=========================================")
         print(f"[Résultats Finaux Robustes — couche {self.layer}]")
         print(f"R² moyen   : {np.mean(scores_finaux):.4f}")
         print(f"R² médian  : {np.median(scores_finaux):.4f}")
         print(f"R² max     : {np.max(scores_finaux):.4f}  ({unite} {label_max})")
-        print(f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}")
-        print(f"=========================================")
+        print(
+            f"{unite.capitalize()}s R² > 0 : {np.sum(scores_finaux > 0)} / {len(scores_finaux)}"
+        )
+        print("=========================================")
 
     def _etendre_valeurs_masque(self, valeurs, masque_roi, valeur_remplissage=0.0):
         """Replace des valeurs calculées sur un sous-ensemble de voxels (ROI) dans un
@@ -177,9 +182,13 @@ class VisualisationResultats:
         fig, ax = plt.subplots(figsize=(10, 5))
 
         sns.histplot(
-            data=df_moyen, x="r2",
-            bins=100, element="step", fill=False,
-            linewidth=2, color="black",
+            data=df_moyen,
+            x="r2",
+            bins=100,
+            element="step",
+            fill=False,
+            linewidth=2,
+            color="black",
             label=f"{self.subject} (med {mediane:.3f})",
             ax=ax,
         )
@@ -188,12 +197,16 @@ class VisualisationResultats:
         ax.axvline(0, color="grey", linestyle=":", linewidth=1)
         ax.set_xlabel("per-voxel R² (raw)")
         ax.set_ylabel(f"Nombre de {unite}")
-        ax.set_title(f"Per-voxel R² distribution — {self.subject} / {self.layer} ({unite})")
+        ax.set_title(
+            f"Per-voxel R² distribution — {self.subject} / {self.layer} ({unite})"
+        )
         ax.legend()
         plt.tight_layout()
 
         nom_fichier = f"r2_distribution_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Distribution R² sauvegardée")
+        chemin_sauvegarde = self._sauvegarder_figure(
+            fig, nom_fichier, "Distribution R² sauvegardée"
+        )
         plt.close(fig)
         return chemin_sauvegarde
 
@@ -211,19 +224,29 @@ class VisualisationResultats:
             tuple : (ordre des ROIs, [(nom de famille, index de fin de bloc), ...]).
                 L'index de fin est exclu, à la façon d'une tranche Python.
         """
-        r2_par_famille = df.groupby("famille")["r2_mean"].mean().sort_values(ascending=False)
+        r2_par_famille = (
+            df.groupby("famille")["r2_mean"].mean().sort_values(ascending=False)
+        )
 
-        familles_classees = [f for f in r2_par_famille.index if f not in FAMILLES_HORS_CLASSEMENT]
-        familles_classees += [f for f in FAMILLES_HORS_CLASSEMENT if f in r2_par_famille.index]
+        familles_classees = [
+            f for f in r2_par_famille.index if f not in FAMILLES_HORS_CLASSEMENT
+        ]
+        familles_classees += [
+            f for f in FAMILLES_HORS_CLASSEMENT if f in r2_par_famille.index
+        ]
 
         ordre, bornes = [], []
         for famille in familles_classees:
-            rois_famille = df[df["famille"] == famille].sort_values("r2_mean", ascending=False)
+            rois_famille = df[df["famille"] == famille].sort_values(
+                "r2_mean", ascending=False
+            )
             ordre.extend(rois_famille["ROI"].tolist())
             bornes.append((famille, len(ordre)))
         return ordre, bornes
 
-    def _tracer_barres_roi(self, ax, df, colonne, ordre, bornes, palette, label_x, noms_familles):
+    def _tracer_barres_roi(
+        self, ax, df, colonne, ordre, bornes, palette, label_x, noms_familles
+    ):
         """Trace un panneau de barres horizontales par ROI sur l'axe donné.
 
         Args :
@@ -239,8 +262,15 @@ class VisualisationResultats:
                 gauche uniquement, sinon le texte se répète inutilement).
         """
         sns.barplot(
-            data=df, y="ROI", x=colonne, order=ordre,
-            hue="famille", palette=palette, dodge=False, ax=ax, legend=False,
+            data=df,
+            y="ROI",
+            x=colonne,
+            order=ordre,
+            hue="famille",
+            palette=palette,
+            dodge=False,
+            ax=ax,
+            legend=False,
         )
 
         # Le R² comme le Pearson peuvent être négatifs (voxels non prédits) : le zéro
@@ -260,17 +290,23 @@ class VisualisationResultats:
                 ax.axhline(fin - 0.5, color="grey", linewidth=0.9, alpha=0.45)
             if noms_familles:
                 ax.text(
-                    -0.34, (debut + fin - 1) / 2, famille,
+                    -0.34,
+                    (debut + fin - 1) / 2,
+                    famille,
                     transform=ax.get_yaxis_transform(),
-                    ha="center", va="center", rotation=90,
-                    fontsize=9, fontweight="bold", color=palette.get(famille, "black"),
+                    ha="center",
+                    va="center",
+                    rotation=90,
+                    fontsize=9,
+                    fontweight="bold",
+                    color=palette.get(famille, "black"),
                 )
             debut = fin
 
-        ax.grid(True, axis='x', linestyle='-', alpha=0.2, color='grey')
+        ax.grid(True, axis="x", linestyle="-", alpha=0.2, color="grey")
         ax.set_axisbelow(True)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
         ax.set_xlabel(label_x, fontsize=11)
         ax.set_ylabel("")
 
@@ -287,9 +323,11 @@ class VisualisationResultats:
             str : texte monospace, deux ROIs par ligne, groupé par famille.
         """
         largeur_roi = max(len(noms_courts[roi]) for roi in ordre) + 1
-        entree = lambda roi: (
-            f"{noms_courts[roi]:<{largeur_roi}} {DESCRIPTIONS_ROIS.get(noms_courts[roi], '')}".rstrip()
-        )
+
+        def entree(roi):
+            nom = noms_courts[roi]
+            return f"{nom:<{largeur_roi}} {DESCRIPTIONS_ROIS.get(nom, '')}".rstrip()
+
         # Largeur de colonne calculée sur TOUTES les entrées, pas famille par famille :
         # sinon chaque bloc aurait sa propre colonne et le texte paraîtrait décalé.
         largeur_colonne = max(len(entree(roi)) for roi in ordre) + 3
@@ -300,7 +338,9 @@ class VisualisationResultats:
             entrees = [entree(roi) for roi in ordre[debut:fin]]
             debut = fin
             for i in range(0, len(entrees), 2):
-                corps = "".join(e.ljust(largeur_colonne) for e in entrees[i:i + 2]).rstrip()
+                corps = "".join(
+                    e.ljust(largeur_colonne) for e in entrees[i : i + 2]
+                ).rstrip()
                 prefixe = f"{famille:<9}" if i == 0 else " " * 9
                 lignes.append(prefixe + corps)
         return "\n".join(lignes)
@@ -341,18 +381,34 @@ class VisualisationResultats:
         # exister dans `palette` sous peine de faire lever seaborn.
         familles = {
             # retinotopy_ROIs
-            "V1": "early", "V2": "early", "V3": "early",
-            "hV4": "ventral", "VO1": "ventral", "VO2": "ventral",
-            "V3a": "ventral", "V3b": "ventral",
-            "LO1": "lateral", "LO2": "lateral", "TO1": "lateral", "TO2": "lateral",
+            "V1": "early",
+            "V2": "early",
+            "V3": "early",
+            "hV4": "ventral",
+            "VO1": "ventral",
+            "VO2": "ventral",
+            "V3a": "ventral",
+            "V3b": "ventral",
+            "LO1": "lateral",
+            "LO2": "lateral",
+            "TO1": "lateral",
+            "TO2": "lateral",
             # fLoc_ROIs
-            "faceFFA": "face", "faceOFA": "face", "facepSTS": "face",
-            "scenePPA": "scene", "sceneOPA": "scene", "sceneMPA": "scene",
+            "faceFFA": "face",
+            "faceOFA": "face",
+            "facepSTS": "face",
+            "scenePPA": "scene",
+            "sceneOPA": "scene",
+            "sceneMPA": "scene",
             "bodyEBA": "body",
             # yeo_ROIs : réseaux entiers, pas des ROIs visuelles — famille à part pour
             # ne pas les faire passer pour des aires du système visuel.
-            "visual": "reseau", "sensorimotor": "reseau", "dorsalAttention": "reseau",
-            "ventralAttention": "reseau", "frontoParietal": "reseau", "defaultMode": "reseau",
+            "visual": "reseau",
+            "sensorimotor": "reseau",
+            "dorsalAttention": "reseau",
+            "ventralAttention": "reseau",
+            "frontoParietal": "reseau",
+            "defaultMode": "reseau",
         }
         palette = {
             "early": "#1f77b4",
@@ -366,18 +422,22 @@ class VisualisationResultats:
         }
 
         if not self.flag_precision_voxel:
-            print("ROImask ignoré : analyse disponible uniquement en précision voxel (flag_precision_voxel=True).")
+            print(
+                "ROImask ignoré : analyse disponible uniquement en précision voxel (flag_precision_voxel=True)."
+            )
             return None
 
         rows = []
-        with h5py.File(fichier_ROImask, 'r') as fichier:
+        with h5py.File(fichier_ROImask, "r") as fichier:
             for groupe in fichier.keys():
                 for sous_cle in fichier[groupe].keys():
                     vecteur = fichier[groupe][sous_cle][:].astype(bool)
                     ligne = {
                         # L'effectif est dans l'étiquette : une moyenne sur 97 voxels et
                         # une sur 2 024 ne se lisent pas de la même façon.
-                        "ROI": f"{sous_cle} (n={int(vecteur.sum()):,})".replace(",", " "),
+                        "ROI": f"{sous_cle} (n={int(vecteur.sum()):,})".replace(
+                            ",", " "
+                        ),
                         "r2_mean": np.mean(scores_finaux[vecteur]),
                         "famille": familles.get(sous_cle, "autre"),
                         "nom_court": sous_cle,
@@ -396,15 +456,32 @@ class VisualisationResultats:
             # de ROIs ne sont écrits qu'une fois, à gauche.
             fig, (ax_r2, ax_pearson) = plt.subplots(1, 2, figsize=(15, 11), sharey=True)
 
-        self._tracer_barres_roi(ax_r2, df, "r2_mean", ordre, bornes, palette,
-                                "R² moyen (raw)", noms_familles=True)
+        self._tracer_barres_roi(
+            ax_r2,
+            df,
+            "r2_mean",
+            ordre,
+            bornes,
+            palette,
+            "R² moyen (raw)",
+            noms_familles=True,
+        )
         if pearson_finaux is not None:
-            self._tracer_barres_roi(ax_pearson, df, "pearson_mean", ordre, bornes, palette,
-                                    "Pearson r moyen", noms_familles=False)
+            self._tracer_barres_roi(
+                ax_pearson,
+                df,
+                "pearson_mean",
+                ordre,
+                bornes,
+                palette,
+                "Pearson r moyen",
+                noms_familles=False,
+            )
 
         fig.suptitle(
             f"Encodage par ROI visuelle — {self.subject} / {self.layer}",
-            fontsize=14, fontweight="bold",
+            fontsize=14,
+            fontweight="bold",
         )
         # Bande réservée en haut pour la légende, qui se glisse sous le titre.
         fig.tight_layout(rect=(0, 0, 1, 0.945))
@@ -415,22 +492,34 @@ class VisualisationResultats:
         familles_tracees = [famille for famille, _ in bornes]
         fig.legend(
             handles=[Patch(facecolor=palette[f], label=f) for f in familles_tracees],
-            loc="upper center", bbox_to_anchor=(0.5, 0.962),
-            ncol=len(familles_tracees), frameon=False, fontsize=10,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.962),
+            ncol=len(familles_tracees),
+            frameon=False,
+            fontsize=10,
         )
 
         # Bloc qui explicite les abréviations, sous la figure : `bbox_inches="tight"` à
         # la sauvegarde englobe ce qui dépasse. `ma="left"` est indispensable — sans lui
         # chaque ligne serait centrée indépendamment et les colonnes ne seraient plus
         # alignées.
-        noms_courts = dict(zip(df["ROI"], df["nom_court"]))
+        noms_courts = dict(zip(df["ROI"], df["nom_court"], strict=True))
         fig.text(
-            0.5, -0.015, self._texte_descriptions_rois(ordre, bornes, noms_courts),
-            ha="center", ma="left", va="top", fontsize=8, family="monospace", linespacing=1.5,
+            0.5,
+            -0.015,
+            self._texte_descriptions_rois(ordre, bornes, noms_courts),
+            ha="center",
+            ma="left",
+            va="top",
+            fontsize=8,
+            family="monospace",
+            linespacing=1.5,
         )
 
         nom_fichier = f"ROImask_{self.subject}_{self.layer}.png"
-        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "ROImask sauvegardé", bbox_inches="tight")
+        chemin_sauvegarde = self._sauvegarder_figure(
+            fig, nom_fichier, "ROImask sauvegardé", bbox_inches="tight"
+        )
         plt.close(fig)
         return chemin_sauvegarde
 
@@ -454,24 +543,28 @@ class VisualisationResultats:
         fractions = [np.mean(r2_moyen >= seuil) for seuil in seuils]
 
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
+        ax.grid(True, axis="both", linestyle="-", alpha=0.2, color="grey")
         ax.set_axisbelow(True)
 
         ax.plot(seuils, fractions, linewidth=2.5, color="#0072B2", label=self.subject)
         ax.axvline(0.05, color="grey", linestyle="--", linewidth=1, alpha=0.5)
         ax.axvline(0.10, color="grey", linestyle="--", linewidth=1, alpha=0.5)
 
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
         ax.set_xlabel("R² threshold", fontsize=12)
         ax.set_ylabel(f"fraction of {unite} ≥ threshold", fontsize=12)
-        ax.set_title(f"How many {unite} are well predicted", fontsize=14, fontweight='bold')
+        ax.set_title(
+            f"How many {unite} are well predicted", fontsize=14, fontweight="bold"
+        )
         ax.legend(frameon=False, loc="upper right")
 
         plt.tight_layout()
 
         nom_fichier = f"r2_threshold_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Threshold R² sauvegardé")
+        chemin_sauvegarde = self._sauvegarder_figure(
+            fig, nom_fichier, "Threshold R² sauvegardé"
+        )
         plt.close(fig)
         return chemin_sauvegarde
 
@@ -494,53 +587,85 @@ class VisualisationResultats:
         means_par_fold = np.mean(scores_par_fold, axis=1)
         medians_par_fold = np.median(scores_par_fold, axis=1)
         seuils_top10_par_fold = np.percentile(scores_par_fold, 90, axis=1)
-        top10_par_fold = np.array([
-            np.mean(fold[fold >= seuil])
-            for fold, seuil in zip(scores_par_fold, seuils_top10_par_fold)
-        ])
+        top10_par_fold = np.array(
+            [
+                np.mean(fold[fold >= seuil])
+                for fold, seuil in zip(
+                    scores_par_fold, seuils_top10_par_fold, strict=True
+                )
+            ]
+        )
         # Le meilleur voxel/parcelle du fold : borne haute de ce que le modèle atteint
         # là où il marche le mieux, que la moyenne du top-10% lisse déjà.
         max_par_fold = np.max(scores_par_fold, axis=1)
 
-        return pd.DataFrame({
-            "Métrique": (["mean"] * n_folds + ["median"] * n_folds
-                         + ["top-10% mean"] * n_folds + ["max"] * n_folds),
-            "Score": np.concatenate([means_par_fold, medians_par_fold, top10_par_fold, max_par_fold]),
-        })
+        return pd.DataFrame(
+            {
+                "Métrique": (
+                    ["mean"] * n_folds
+                    + ["median"] * n_folds
+                    + ["top-10% mean"] * n_folds
+                    + ["max"] * n_folds
+                ),
+                "Score": np.concatenate(
+                    [means_par_fold, medians_par_fold, top10_par_fold, max_par_fold]
+                ),
+            }
+        )
 
     def _tracer_barres_accuracy(self, ax, scores_par_fold, label_y):
         """Trace un panneau de barres mean/median/top-10%/max sur l'axe donné."""
-        ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
+        ax.grid(True, axis="both", linestyle="-", alpha=0.2, color="grey")
         ax.set_axisbelow(True)
 
         df = self._stats_par_fold(scores_par_fold)
         ordre_metriques = ["mean", "median", "top-10% mean", "max"]
 
         # Palette Okabe-Ito (sûre pour les daltonismes) : bleu, bleu clair, orange, vert.
-        palette = {"mean": "#0072B2", "median": "#56B4E9", "top-10% mean": "#E69F00", "max": "#009E73"}
+        palette = {
+            "mean": "#0072B2",
+            "median": "#56B4E9",
+            "top-10% mean": "#E69F00",
+            "max": "#009E73",
+        }
         sns.barplot(
-            data=df, x="Métrique", y="Score", hue="Métrique",
-            palette=palette, ax=ax, errorbar="sd", capsize=0.1, legend=False,
+            data=df,
+            x="Métrique",
+            y="Score",
+            hue="Métrique",
+            palette=palette,
+            ax=ax,
+            errorbar="sd",
+            capsize=0.1,
+            legend=False,
         )
 
         # seaborn ne renseigne pas `container.errorbar`, donc `ax.bar_label` collerait
         # les étiquettes au sommet des barres, par-dessus les moustaches. On les place
         # nous-mêmes au-dessus de la moustache haute (même écart-type que seaborn,
         # ddof=1 ; NaN si un seul fold).
-        ecarts = df.groupby("Métrique")["Score"].std().reindex(ordre_metriques).fillna(0.0)
-        for nom_metrique, container in zip(ordre_metriques, ax.containers):
+        ecarts = (
+            df.groupby("Métrique")["Score"].std().reindex(ordre_metriques).fillna(0.0)
+        )
+        for nom_metrique, container in zip(ordre_metriques, ax.containers, strict=True):
             barre = container[0]
             hauteur = barre.get_height()
             ax.annotate(
                 f"{hauteur:.3f}",
-                xy=(barre.get_x() + barre.get_width() / 2, hauteur + ecarts[nom_metrique]),
-                xytext=(0, 3), textcoords="offset points",
-                ha='center', va='bottom', fontsize=9,
+                xy=(
+                    barre.get_x() + barre.get_width() / 2,
+                    hauteur + ecarts[nom_metrique],
+                ),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=9,
             )
         ax.margins(y=0.12)
 
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
         ax.set_xlabel("")
         ax.set_ylabel(label_y, fontsize=12)
 
@@ -577,24 +702,28 @@ class VisualisationResultats:
         else:
             fig, (ax_r2, ax_pearson) = plt.subplots(1, 2, figsize=(12, 6))
             self._tracer_barres_accuracy(ax_r2, r2_tous_les_tests, "R² (raw)")
-            self._tracer_barres_accuracy(ax_pearson, pearson_tous_les_tests, "Pearson r")
+            self._tracer_barres_accuracy(
+                ax_pearson, pearson_tous_les_tests, "Pearson r"
+            )
             taille_titre = 14
 
         fig.suptitle(
             f"Accuracy — {self.subject} / {self.layer} (n={n_features:,}, {n_folds} folds)",
-            fontsize=taille_titre, fontweight='bold',
+            fontsize=taille_titre,
+            fontweight="bold",
         )
         plt.tight_layout()
 
         nom_fichier = f"accuracy_{self.subject}_{self.layer}{suffix}.png"
-        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Accuracy sauvegardée")
+        chemin_sauvegarde = self._sauvegarder_figure(
+            fig, nom_fichier, "Accuracy sauvegardée"
+        )
         plt.close(fig)
         return chemin_sauvegarde
 
-
     def _tracer_barres_comparaison(self, ax, scores_par_scope, label_y):
         """Trace un panneau de barres mean/median/top-10%/max groupées par scope."""
-        ax.grid(True, axis='both', linestyle='-', alpha=0.2, color='grey')
+        ax.grid(True, axis="both", linestyle="-", alpha=0.2, color="grey")
         ax.set_axisbelow(True)
 
         # `_stats_par_fold` est réutilisé tel quel : une ligne par (métrique × fold),
@@ -618,9 +747,16 @@ class VisualisationResultats:
         }
 
         sns.barplot(
-            data=df, x="Métrique", y="Score", hue="Scope",
-            order=ordre_metriques, hue_order=ordre_scopes,
-            palette=palette, ax=ax, errorbar="sd", capsize=0.06,
+            data=df,
+            x="Métrique",
+            y="Score",
+            hue="Scope",
+            order=ordre_metriques,
+            hue_order=ordre_scopes,
+            palette=palette,
+            ax=ax,
+            errorbar="sd",
+            capsize=0.06,
         )
 
         # Même problème que dans `_tracer_barres_accuracy` : seaborn ne renseigne pas
@@ -629,21 +765,27 @@ class VisualisationResultats:
         # métrique (l'autre helper, avec hue == x, n'en a qu'une), d'où la double
         # boucle et l'écart-type pris sur le couple (scope, métrique).
         ecarts = df.groupby(["Scope", "Métrique"])["Score"].std().fillna(0.0)
-        for etiquette, container in zip(ordre_scopes, ax.containers):
-            for nom_metrique, barre in zip(ordre_metriques, container):
+        for etiquette, container in zip(ordre_scopes, ax.containers, strict=True):
+            for nom_metrique, barre in zip(ordre_metriques, container, strict=True):
                 hauteur = barre.get_height()
                 ax.annotate(
                     f"{hauteur:.3f}",
-                    xy=(barre.get_x() + barre.get_width() / 2,
-                        hauteur + ecarts[(etiquette, nom_metrique)]),
-                    xytext=(0, 3), textcoords="offset points",
-                    ha='center', va='bottom', fontsize=7, rotation=90,
+                    xy=(
+                        barre.get_x() + barre.get_width() / 2,
+                        hauteur + ecarts[(etiquette, nom_metrique)],
+                    ),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                    rotation=90,
                 )
         # Plus de marge que sur la figure à un scope : les étiquettes sont verticales.
         ax.margins(y=0.22)
 
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
         ax.set_xlabel("")
         ax.set_ylabel(label_y, fontsize=12)
         ax.legend(title="", fontsize=9, frameon=False)
@@ -671,14 +813,23 @@ class VisualisationResultats:
                 for nom in noms
             )
             entete = f"{nom_scope} ({len(tuple(noms))}) — "
-            paragraphes.append(textwrap.fill(
-                entete + details, width=largeur,
-                subsequent_indent=" " * 4,
-            ))
+            paragraphes.append(
+                textwrap.fill(
+                    entete + details,
+                    width=largeur,
+                    subsequent_indent=" " * 4,
+                )
+            )
         return "\n".join(paragraphes)
 
-    def plot_comparaison_scopes(self, nom_methode, r2_par_scope, pearson_par_scope=None,
-                                composition_scopes=None, suffix=""):
+    def plot_comparaison_scopes(
+        self,
+        nom_methode,
+        r2_par_scope,
+        pearson_par_scope=None,
+        composition_scopes=None,
+        suffix="",
+    ):
         """Compare les zones cérébrales analysées dans UNE figure, pour une méthode.
 
         Remplace les planches séparées par scope : mêmes métriques que `plot_accuracy`,
@@ -726,11 +877,14 @@ class VisualisationResultats:
             self._tracer_barres_comparaison(ax_pearson, pearson_par_scope, "Pearson r")
             taille_titre = 14
 
-        unite = "voxels analysés" if self.flag_precision_voxel else "parcelles analysées"
+        unite = (
+            "voxels analysés" if self.flag_precision_voxel else "parcelles analysées"
+        )
         fig.suptitle(
             f"Comparaison des {unite} — {nom_methode} — "
             f"{self.subject} / {self.layer} ({n_folds} folds)",
-            fontsize=taille_titre, fontweight='bold',
+            fontsize=taille_titre,
+            fontweight="bold",
         )
         plt.tight_layout()
 
@@ -738,22 +892,35 @@ class VisualisationResultats:
         # "visuelles" ne dit pas quelles aires il recouvre. `bbox_inches="tight"`
         # englobe ce qui dépasse ; `ma="left"` garde l'indentation du repli.
         if composition_scopes:
-            texte = self._texte_composition_scopes(composition_scopes, list(r2_par_scope))
+            texte = self._texte_composition_scopes(
+                composition_scopes, list(r2_par_scope)
+            )
             if texte:
                 fig.text(
-                    0.5, -0.02, texte,
-                    ha="center", ma="left", va="top", fontsize=8,
-                    family="monospace", linespacing=1.5,
+                    0.5,
+                    -0.02,
+                    texte,
+                    ha="center",
+                    ma="left",
+                    va="top",
+                    fontsize=8,
+                    family="monospace",
+                    linespacing=1.5,
                 )
 
         nom_fichier = f"comparaison_scopes_{self.subject}_{self.layer}{suffix}.png"
         chemin_sauvegarde = self._sauvegarder_figure(
-            fig, nom_fichier, "Comparaison des scopes sauvegardée", bbox_inches="tight",
+            fig,
+            nom_fichier,
+            "Comparaison des scopes sauvegardée",
+            bbox_inches="tight",
         )
         plt.close(fig)
         return chemin_sauvegarde
 
-    def plot_alphas_histogram(self, alphas_fold, grille_alphas, alphas_finaux=None, titre=None, suffix=""):
+    def plot_alphas_histogram(
+        self, alphas_fold, grille_alphas, alphas_finaux=None, titre=None, suffix=""
+    ):
         """Trace la distribution (log10) des alphas sélectionnés et l'enregistre en PNG.
 
         Args :
@@ -777,12 +944,20 @@ class VisualisationResultats:
         if alphas_finaux is not None:
             log10_valeurs = np.log10(alphas_finaux)
             df = pd.DataFrame({"log10_alpha": log10_valeurs})
-            hue_params = {"color": "#d73027", "kde": True, "kde_kws": {"bw_adjust": 0.5}, "line_kws": {"linewidth": 2}}
+            hue_params = {
+                "color": "#d73027",
+                "kde": True,
+                "kde_kws": {"bw_adjust": 0.5},
+                "line_kws": {"linewidth": 2},
+            }
             titre_defaut = "Distribution des alphas moyens"
         else:
             alphas_fold = np.array(alphas_fold)
-            rows = [{"log10_alpha": np.log10(v), "fold": f"fold_{i + 1}"}
-                    for i, fold in enumerate(alphas_fold) for v in fold]
+            rows = [
+                {"log10_alpha": np.log10(v), "fold": f"fold_{i + 1}"}
+                for i, fold in enumerate(alphas_fold)
+                for v in fold
+            ]
             df = pd.DataFrame(rows)
             log10_valeurs = np.log10(alphas_fold.flatten())
             hue_params = {"hue": "fold", "multiple": "dodge", "palette": "tab20"}
@@ -790,11 +965,15 @@ class VisualisationResultats:
 
         xlim_min = log10_valeurs.min() - step / 2
         xlim_max = log10_valeurs.max() + step / 2
-        ticks_visibles = log10_grille[(log10_grille >= xlim_min) & (log10_grille <= xlim_max)]
+        ticks_visibles = log10_grille[
+            (log10_grille >= xlim_min) & (log10_grille <= xlim_max)
+        ]
 
         unite = "voxels" if self.flag_precision_voxel else "parcelles"
         fig, ax = plt.subplots(figsize=(10, 5))
-        sns.histplot(data=df, x="log10_alpha", bins=bins, shrink=0.8, ax=ax, **hue_params)
+        sns.histplot(
+            data=df, x="log10_alpha", bins=bins, shrink=0.8, ax=ax, **hue_params
+        )
         ax.set_xticks(ticks_visibles)
         ax.set_xticklabels([f"{x:.1f}" for x in ticks_visibles], rotation=45)
         ax.set_xlim(xlim_min, xlim_max)
@@ -802,13 +981,27 @@ class VisualisationResultats:
         ax.set_ylabel(f"Nombre de {unite}")
         ax.set_title(titre if titre is not None else titre_defaut)
         plt.tight_layout()
-        nom_fichier = f"histogram_alphas_{self.subject}_{self.layer}_{unite}{suffix}.png"
-        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Histogramme alphas sauvegardé")
+        nom_fichier = (
+            f"histogram_alphas_{self.subject}_{self.layer}_{unite}{suffix}.png"
+        )
+        chemin_sauvegarde = self._sauvegarder_figure(
+            fig, nom_fichier, "Histogramme alphas sauvegardé"
+        )
         plt.close(fig)
         return chemin_sauvegarde
 
-    def _brain_mapping_generique(self, donnees, nom_carte, cmap, treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin=None, vmax=None, suffix=""):
-        """Projette un vecteur de scores (R², alphas, TSNR...) sur le cerveau et
+    def _brain_mapping_generique(
+        self,
+        donnees,
+        nom_carte,
+        cmap,
+        treshold=SEUIL_AFFICHAGE_BRAIN_MAP,
+        echelle_log=False,
+        vmin=None,
+        vmax=None,
+        suffix="",
+    ):
+        """Projette un vecteur de scores (R², alphas...) sur le cerveau et
         enregistre la carte statistique en PNG.
 
         Args :
@@ -829,19 +1022,25 @@ class VisualisationResultats:
         chemins = self.chemins
 
         donnees_affichees = np.log10(donnees) if echelle_log else donnees
-        coords_R2_map = {'x': np.array([-52.5, -28.5, -12.5, 9.5, 21.5, 35.5, 47.5]), 'y': np.array([-96.5, -80.5, -60.5, -42.5, -26.5, 53.5, 69.5]), 'z': np.array([-18.5, -4.5, 7.5, 19.5, 31.5, 45.5, 61.5])}
+        coords_R2_map = {
+            "x": np.array([-52.5, -28.5, -12.5, 9.5, 21.5, 35.5, 47.5]),
+            "y": np.array([-96.5, -80.5, -60.5, -42.5, -26.5, 53.5, 69.5]),
+            "z": np.array([-18.5, -4.5, 7.5, 19.5, 31.5, 45.5, 61.5]),
+        }
 
-        if self.flag_precision_voxel == True:
+        if self.flag_precision_voxel:
             masker = NiftiMasker(mask_img=chemins.chemin_atlas, standardize=False)
             kwargs = {"bg_img": chemins.chemin_anatomie}
         else:
-            masker = NiftiLabelsMasker(labels_img=chemins.chemin_atlas, standardize=False)
+            masker = NiftiLabelsMasker(
+                labels_img=chemins.chemin_atlas, standardize=False
+            )
             kwargs = {"cut_coords": coords_R2_map}
 
         masker.fit()
         r2_map_3d = masker.inverse_transform(donnees_affichees)
 
-        fig = plt.figure(figsize=(14, 10), facecolor='white')
+        fig = plt.figure(figsize=(14, 10), facecolor="white")
 
         display = plot_stat_map(
             r2_map_3d,
@@ -850,27 +1049,37 @@ class VisualisationResultats:
             vmin=vmin,
             vmax=vmax,
             symmetric_cbar=False,
-            display_mode='mosaic',
+            display_mode="mosaic",
             cbar_tick_format="%.2f",
             colorbar=True,
             cmap=cmap,
             **kwargs,
         )
-        unite = "voxel" if self.flag_precision_voxel == True else "parcelle"
-        title=f'{nom_carte} pour {self.subject} - {self.layer} en {unite}'
-        fig.suptitle(title, fontsize=18, fontweight='bold', color='black', y=0.98, ha='center')
+        unite = "voxel" if self.flag_precision_voxel else "parcelle"
+        title = f"{nom_carte} pour {self.subject} - {self.layer} en {unite}"
+        fig.suptitle(
+            title, fontsize=18, fontweight="bold", color="black", y=0.98, ha="center"
+        )
         fig.subplots_adjust(top=0.92)
 
         if echelle_log and display._cbar is not None:
-            display._cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda valeur, position: f"$10^{{{valeur:.0f}}}$"))
+            display._cbar.ax.yaxis.set_major_formatter(
+                FuncFormatter(lambda valeur, position: f"$10^{{{valeur:.0f}}}$")
+            )
 
-        nom_fichier = f"brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}{suffix}.png"
-        chemin_sauvegarde = self._sauvegarder_figure(display, nom_fichier, "Carte cérébrale sauvegardée")
+        nom_fichier = (
+            f"brain_map_{self.subject}_{self.layer}_{nom_carte}_{unite}{suffix}.png"
+        )
+        chemin_sauvegarde = self._sauvegarder_figure(
+            display, nom_fichier, "Carte cérébrale sauvegardée"
+        )
         display.close()
         plt.close(fig)
         return chemin_sauvegarde
 
-    def brain_mapping_r2(self, scores_r2, noms_parcelles=None, suffix="", masque_roi=None):
+    def brain_mapping_r2(
+        self, scores_r2, noms_parcelles=None, suffix="", masque_roi=None
+    ):
         """Affiche le résumé des R² (`print_scores`) et enregistre la carte cérébrale
         correspondante.
 
@@ -888,8 +1097,19 @@ class VisualisationResultats:
             Path : chemin du fichier PNG sauvegardé.
         """
         self.print_scores(scores_r2, noms_parcelles)
-        donnees_carte = self._etendre_valeurs_masque(scores_r2, masque_roi, valeur_remplissage=0.0)
-        chemin_sauvegarde = self._brain_mapping_generique(donnees_carte, nom_carte="R2", cmap="YlOrRd", treshold=SEUIL_AFFICHAGE_BRAIN_MAP, echelle_log=False, vmin=0, vmax=np.max(scores_r2), suffix=suffix)
+        donnees_carte = self._etendre_valeurs_masque(
+            scores_r2, masque_roi, valeur_remplissage=0.0
+        )
+        chemin_sauvegarde = self._brain_mapping_generique(
+            donnees_carte,
+            nom_carte="R2",
+            cmap="YlOrRd",
+            treshold=SEUIL_AFFICHAGE_BRAIN_MAP,
+            echelle_log=False,
+            vmin=0,
+            vmax=np.max(scores_r2),
+            suffix=suffix,
+        )
         return chemin_sauvegarde
 
     def brain_mapping_alphas(self, alphas_tous_les_lots, suffix="", masque_roi=None):
@@ -905,26 +1125,26 @@ class VisualisationResultats:
         Returns :
             Path : chemin du fichier PNG sauvegardé.
         """
-        donnees_carte = self._etendre_valeurs_masque(alphas_tous_les_lots, masque_roi, valeur_remplissage=1.0)
-        chemin_sauvegarde = self._brain_mapping_generique(donnees_carte, nom_carte="Alphas", cmap="YlOrRd", treshold=0, echelle_log=True, suffix=suffix)
+        donnees_carte = self._etendre_valeurs_masque(
+            alphas_tous_les_lots, masque_roi, valeur_remplissage=1.0
+        )
+        chemin_sauvegarde = self._brain_mapping_generique(
+            donnees_carte,
+            nom_carte="Alphas",
+            cmap="YlOrRd",
+            treshold=0,
+            echelle_log=True,
+            suffix=suffix,
+        )
         return chemin_sauvegarde
 
-    def brain_mapping_tsnr(self, tsnr, suffix=""):
-        """Enregistre la carte cérébrale du TSNR (borné au 95e percentile pour éviter
-        que les valeurs extrêmes n'écrasent la colorbar).
-
-        Args :
-            tsnr : TSNR par voxel/parcelle.
-            suffix : suffixe ajouté au nom du fichier de sortie.
-
-        Returns :
-            Path : chemin du fichier PNG sauvegardé.
-        """
-        chemin_sauvegarde = self._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues", treshold=0.0, echelle_log=False, vmin=0, vmax=np.percentile(tsnr, 95), suffix=suffix)
-        return chemin_sauvegarde
-
-    def regrouper_figures_dans_une_planche(self, nom_methode, liste_chemins_figures,
-                                           nombre_de_colonnes=3, figures_pleine_largeur=()):
+    def regrouper_figures_dans_une_planche(
+        self,
+        nom_methode,
+        liste_chemins_figures,
+        nombre_de_colonnes=3,
+        figures_pleine_largeur=(),
+    ):
         """Assemble toutes les figures PNG déjà sauvegardées pour UNE méthode de
         validation croisée dans une seule image PNG (une "planche"), au lieu d'avoir
         un fichier séparé par figure.
@@ -982,14 +1202,18 @@ class VisualisationResultats:
             if len(rangee) == 1 and rangee[0] in pleine_largeur:
                 largeur_px, hauteur_px = Image.open(rangee[0]).size
                 hauteur_voulue = largeur_totale * hauteur_px / largeur_px
-                proportions_hauteur.append(min(hauteur_voulue, 3 * hauteur_par_case) / hauteur_par_case)
+                proportions_hauteur.append(
+                    min(hauteur_voulue, 3 * hauteur_par_case) / hauteur_par_case
+                )
             else:
                 proportions_hauteur.append(1.0)
 
         hauteur_totale = hauteur_par_case * sum(proportions_hauteur)
         figure_planche = plt.figure(figsize=(largeur_totale, hauteur_totale))
         grille = figure_planche.add_gridspec(
-            len(rangees), nombre_de_colonnes, height_ratios=proportions_hauteur,
+            len(rangees),
+            nombre_de_colonnes,
+            height_ratios=proportions_hauteur,
         )
 
         # Étape 4 : on place chaque image dans sa case (ou sur toute la rangée).
@@ -1002,7 +1226,9 @@ class VisualisationResultats:
                     for numero_colonne in range(nombre_de_colonnes)
                 ]
 
-            for case, chemin_image in zip(cases, rangee):
+            # Inégal à dessein : la dernière rangée est incomplète, alors que `cases`
+            # compte toujours `nombre_de_colonnes` entrées. zip s'arrête au plus court.
+            for case, chemin_image in zip(cases, rangee, strict=False):
                 case.imshow(plt.imread(chemin_image))
                 case.set_title(Path(chemin_image).stem, fontsize=8)
 
@@ -1017,20 +1243,35 @@ class VisualisationResultats:
         bande_titre_pouces = 0.6
         titre_planche = f"{nom_methode} — {self.subject} / {self.layer}"
         figure_planche.suptitle(
-            titre_planche, fontsize=16, fontweight="bold",
-            y=1 - 0.15 / hauteur_totale, va="top",
+            titre_planche,
+            fontsize=16,
+            fontweight="bold",
+            y=1 - 0.15 / hauteur_totale,
+            va="top",
         )
-        figure_planche.tight_layout(rect=(0, 0, 1, 1 - bande_titre_pouces / hauteur_totale))
+        figure_planche.tight_layout(
+            rect=(0, 0, 1, 1 - bande_titre_pouces / hauteur_totale)
+        )
 
         nom_fichier_planche = f"planche_{nom_methode}_{self.subject}_{self.layer}.png"
-        chemin_sauvegarde = self._sauvegarder_figure(figure_planche, nom_fichier_planche, "Planche de figures sauvegardée")
+        chemin_sauvegarde = self._sauvegarder_figure(
+            figure_planche, nom_fichier_planche, "Planche de figures sauvegardée"
+        )
         plt.close(figure_planche)
 
         return chemin_sauvegarde
 
-    def generer_toutes_les_figures(self, nom_methode, resultats, grille_alphas, noms_parcelles=None,
-                                   masque_roi=None, r2_par_scope=None, pearson_par_scope=None,
-                                   composition_scopes=None):
+    def generer_toutes_les_figures(
+        self,
+        nom_methode,
+        resultats,
+        grille_alphas,
+        noms_parcelles=None,
+        masque_roi=None,
+        r2_par_scope=None,
+        pearson_par_scope=None,
+        composition_scopes=None,
+    ):
         """Génère et sauvegarde l'ensemble des figures standard pour UNE méthode de
         validation croisée (appelée une fois par méthode : full_manuel, ridgecv_loo,
         one_cycle...).
@@ -1065,37 +1306,50 @@ class VisualisationResultats:
         alphas_tous_externes = resultats.alphas_tous_externes
         best_alphas_inner = resultats.best_alphas_inner
         pearson_tous_les_tests = resultats.pearson_tous_les_tests
-        tsnr = resultats.TSNR
 
         suffix = f"_{nom_methode}"
         # Moyenne géométrique sur les folds (les alphas s'étalent sur plusieurs décades)
         alphas_moyens = 10 ** np.mean(np.log10(alphas_tous_externes), axis=0)
 
-        print(f"\n[FIGURES] {nom_methode} — Variance inter-folds moyenne : {np.mean(r2_variance_inter_folds):.6f}")
+        print(
+            f"\n[FIGURES] {nom_methode} — Variance inter-folds moyenne : {np.mean(r2_variance_inter_folds):.6f}"
+        )
         if resultats.pearson_moyen is not None:
-            print(f"[FIGURES] {nom_methode} — Pearson moyen : {np.mean(resultats.pearson_moyen):.4f}")
+            print(
+                f"[FIGURES] {nom_methode} — Pearson moyen : {np.mean(resultats.pearson_moyen):.4f}"
+            )
 
         # Liste explicite des chemins de chaque figure produite pour cette méthode :
         # elle sert ensuite à assembler toutes ces figures dans une seule planche.
         liste_chemins_figures = []
 
-        # 1. brain_r2_map + 2. alpha_map (+ TSNR, cohérent avec les deux autres cartes)
-        print(" -> Cartes cérébrales (R², Alphas, TSNR)...")
-        chemin_figure = self.brain_mapping_r2(r2_moyen, noms_parcelles, suffix=suffix, masque_roi=masque_roi)
+        # 1. brain_r2_map + 2. alpha_map
+        print(" -> Cartes cérébrales (R², Alphas)...")
+        chemin_figure = self.brain_mapping_r2(
+            r2_moyen, noms_parcelles, suffix=suffix, masque_roi=masque_roi
+        )
         liste_chemins_figures.append(chemin_figure)
 
-        chemin_figure = self.brain_mapping_alphas(alphas_moyens, suffix=suffix, masque_roi=masque_roi)
+        chemin_figure = self.brain_mapping_alphas(
+            alphas_moyens, suffix=suffix, masque_roi=masque_roi
+        )
         liste_chemins_figures.append(chemin_figure)
-
-        #chemin_figure = self.brain_mapping_tsnr(tsnr, suffix=suffix)
-        #liste_chemins_figures.append(chemin_figure)
 
         # 3. histogrammes des alphas par fold + 4. moyenne des alphas
         print(" -> Histogrammes des alphas...")
-        chemin_figure = self.plot_alphas_histogram(alphas_fold=alphas_tous_externes, grille_alphas=grille_alphas, suffix=f"{suffix}_folds")
+        chemin_figure = self.plot_alphas_histogram(
+            alphas_fold=alphas_tous_externes,
+            grille_alphas=grille_alphas,
+            suffix=f"{suffix}_folds",
+        )
         liste_chemins_figures.append(chemin_figure)
 
-        chemin_figure = self.plot_alphas_histogram(alphas_fold=None, grille_alphas=grille_alphas, alphas_finaux=alphas_moyens, suffix=f"{suffix}_moyen")
+        chemin_figure = self.plot_alphas_histogram(
+            alphas_fold=None,
+            grille_alphas=grille_alphas,
+            alphas_finaux=alphas_moyens,
+            suffix=f"{suffix}_moyen",
+        )
         liste_chemins_figures.append(chemin_figure)
 
         # 5. visualisation des alphas internes (uniquement si la méthode en produit).
@@ -1113,14 +1367,20 @@ class VisualisationResultats:
             )
             liste_chemins_figures.append(chemin_figure)
         else:
-            print(f"  -> Pas d'alphas internes pour {nom_methode} (pas de sous-CV interne).")
+            print(
+                f"  -> Pas d'alphas internes pour {nom_methode} (pas de sous-CV interne)."
+            )
 
         # 6. courbe d'accuracy (single-subject), distributionr2 et r2 treshold.
         # Le Pearson, quand la méthode en produit, s'affiche en second panneau de la
         # figure accuracy — pas en carte cérébrale : il dessinerait la même topographie
         # que le R², sur une échelle différente.
         print(" -> Accuracy et distribution R²...")
-        chemin_figure = self.plot_accuracy(r2_tous_les_tests, pearson_tous_les_tests=pearson_tous_les_tests, suffix=suffix)
+        chemin_figure = self.plot_accuracy(
+            r2_tous_les_tests,
+            pearson_tous_les_tests=pearson_tous_les_tests,
+            suffix=suffix,
+        )
         liste_chemins_figures.append(chemin_figure)
 
         chemin_figure = self.plot_r2_distribution(r2_tous_les_tests, suffix=suffix)
@@ -1138,19 +1398,26 @@ class VisualisationResultats:
         # n'apporte rien de plus)
         if self.flag_precision_voxel and masque_roi is None:
             print(" -> ROIMask...")
-            chemin_figure = self.plot_ROImask_histogram(r2_moyen, pearson_finaux=resultats.pearson_moyen)
+            chemin_figure = self.plot_ROImask_histogram(
+                r2_moyen, pearson_finaux=resultats.pearson_moyen
+            )
             liste_chemins_figures.append(chemin_figure)
             figures_pleine_largeur.append(chemin_figure)
         elif masque_roi is None:
-            print(f"  -> ROIMask ignoré pour {nom_methode} (nécessite flag_precision_voxel=True).")
+            print(
+                f"  -> ROIMask ignoré pour {nom_methode} (nécessite flag_precision_voxel=True)."
+            )
 
         # Comparaison des zones cérébrales : produite ici plutôt que dans un fichier à
         # part, pour qu'une méthode ne laisse qu'un seul PNG derrière elle.
         if r2_par_scope:
             print(" -> Comparaison des scopes...")
             chemin_figure = self.plot_comparaison_scopes(
-                nom_methode, r2_par_scope, pearson_par_scope,
-                composition_scopes=composition_scopes, suffix=suffix,
+                nom_methode,
+                r2_par_scope,
+                pearson_par_scope,
+                composition_scopes=composition_scopes,
+                suffix=suffix,
             )
             liste_chemins_figures.append(chemin_figure)
             figures_pleine_largeur.append(chemin_figure)
@@ -1158,7 +1425,9 @@ class VisualisationResultats:
         # Regroupement de toutes les figures ci-dessus dans un seul fichier PNG.
         print(" -> Assemblage de la planche de figures...")
         chemin_planche = self.regrouper_figures_dans_une_planche(
-            nom_methode, liste_chemins_figures, figures_pleine_largeur=figures_pleine_largeur,
+            nom_methode,
+            liste_chemins_figures,
+            figures_pleine_largeur=figures_pleine_largeur,
         )
 
         # Une fois la planche assemblée, les figures individuelles ne servent plus :
@@ -1167,7 +1436,9 @@ class VisualisationResultats:
             for chemin_figure in liste_chemins_figures:
                 if chemin_figure is not None and chemin_figure != chemin_planche:
                     chemin_figure.unlink(missing_ok=True)
-            print(f" -> Figures individuelles supprimées ({len(liste_chemins_figures)} fichiers).")
+            print(
+                f" -> Figures individuelles supprimées ({len(liste_chemins_figures)} fichiers)."
+            )
 
         return {
             "r2_moyen": r2_moyen,

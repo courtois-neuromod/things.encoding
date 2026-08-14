@@ -3,21 +3,25 @@ Extraction des représentations latentes de TRIBE v2 sur toutes les vidéos.
 Parcourt récursivement le dossier data, passe chaque vidéo à TribeModel avec
 forward hooks, et sauvegarde les activations en HDF5.
 """
-import warnings
+
 import argparse
+import gc
 import logging
+import warnings
 from pathlib import Path
+
 import h5py
 import torch
-import gc
 
 from Config import Config
 from HDF5Writer import HDF5Writer
 from TransformerHooks import TransformerHooks
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Extraction des latents TRIBE v2')
-    parser.add_argument('--subject', type=str, required=True, help='Identifiant du sujet à traiter')
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Extraction des latents TRIBE v2")
+    parser.add_argument(
+        "--subject", type=str, required=True, help="Identifiant du sujet à traiter"
+    )
     args = parser.parse_args()
 
     warnings.filterwarnings("ignore")
@@ -33,7 +37,7 @@ if __name__ == '__main__':
     HDF5_DIR = ROOT / "output" / "features" / "things_encoding"
 
     model = config.charger_modele()
-    fmri_enc = model.__pydantic_private__['_model']
+    fmri_enc = model.__pydantic_private__["_model"]
 
     writer = HDF5Writer(HDF5_DIR)
     video_files = sorted(DATA_DIR.rglob(f"{args.subject}_*_task-*_desc-CFR.mp4"))
@@ -46,14 +50,14 @@ if __name__ == '__main__':
         run = next((p for p in parts if p.startswith("run-")), "run-unknown")
 
         if not subject.startswith("sub-") or not session.startswith("ses-"):
-            print(f"Structure invalide : {video_path.name}",flush=True)
+            print(f"Structure invalide : {video_path.name}", flush=True)
             continue
 
         output_path = HDF5_DIR / f"{subject}.h5"
         if output_path.exists():
             with h5py.File(output_path, "r") as hf:
-                run_path =f"{session}/{run}"
-                if run_path in hf and 'preds' in hf[run_path]:
+                run_path = f"{session}/{run}"
+                if run_path in hf and "preds" in hf[run_path]:
                     print(f"{subject}/{session}/{run} déjà traité")
                     continue
 
@@ -71,7 +75,10 @@ if __name__ == '__main__':
 
             writer.sauvegarder(features, preds, subject, session, run)
 
-            print(f"{subject}/{session}/{run} traité - preds shape: {preds.shape}",flush=True)
+            print(
+                f"{subject}/{session}/{run} traité - preds shape: {preds.shape}",
+                flush=True,
+            )
 
             # Nettoyage de la mémoire pour la vidéo suivante
             del features, preds, segments, events, hooks
@@ -81,6 +88,4 @@ if __name__ == '__main__':
                 torch.cuda.empty_cache()
 
         except Exception as e:
-            print(f"{subject}/{session}/{run} non traité - Erreur: {e}",flush=True)
-
-
+            print(f"{subject}/{session}/{run} non traité - Erreur: {e}", flush=True)

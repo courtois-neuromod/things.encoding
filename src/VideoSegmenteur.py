@@ -1,22 +1,22 @@
 import subprocess
 
-class VideoSegmenteur:
 
+class VideoSegmenteur:
     def __init__(self, video_path, stimuli_dir):
         self.video_path = video_path
         self.stimuli_dir = stimuli_dir
 
     def create_segment(self, start, duration, output_video_path):
-        """ Pour dupliquer frames, utiliser ces paramètres
-            "ffmpeg", "-y",
-            "-ss", f"{start:.3f}",
-            "-t", f"{duration:.3f}",
-            "-i", str(self.video_path),
-            "-vf", "fps=29.97",  # duplique la frame fixe sur toute la durée
-            "-fps_mode", "cfr",  # force un framerate constant
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            str(self.stimuli_dir / f"image{segments_idx:04d}.mp4"),
+        """Pour dupliquer frames, utiliser ces paramètres
+        "ffmpeg", "-y",
+        "-ss", f"{start:.3f}",
+        "-t", f"{duration:.3f}",
+        "-i", str(self.video_path),
+        "-vf", "fps=29.97",  # duplique la frame fixe sur toute la durée
+        "-fps_mode", "cfr",  # force un framerate constant
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        str(self.stimuli_dir / f"image{segments_idx:04d}.mp4"),
         """
         """
         subprocess.run([
@@ -30,30 +30,47 @@ class VideoSegmenteur:
             str(self.stimuli_dir / f"image{segments_idx:04d}.mp4"),
         ]
         """
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-ss", f"{start:.3f}",
-            "-t", f"{duration:.3f}",
-            "-i", str(self.video_path),
-            "-vf", "fps=30",  # duplique la frame fixe sur toute la durée
-            "-vsync", "1",  # force un framerate constant
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            str(output_video_path),
-        ]
-        , capture_output=True)
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{start:.3f}",
+                "-t",
+                f"{duration:.3f}",
+                "-i",
+                str(self.video_path),
+                "-vf",
+                "fps=30",  # duplique la frame fixe sur toute la durée
+                "-vsync",
+                "1",  # force un framerate constant
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(output_video_path),
+            ],
+            capture_output=True,
+        )
 
     def etendre_video(self, duree, video, output_video_path):
-        subprocess.run([
-            "ffmpeg",
-            "-y",
-            "-stream_loop", "-1",
-            "-i", video,
-            "-t", str(duree),
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            str(output_video_path),
-        ])
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-stream_loop",
+                "-1",
+                "-i",
+                video,
+                "-t",
+                str(duree),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(output_video_path),
+            ]
+        )
 
     def cut_run(self, timestamps, n_frames):
         segments_idx = 0
@@ -61,15 +78,19 @@ class VideoSegmenteur:
             frame_start = float(timestamps[i])
             frame_end = float(timestamps[i + 1])
             frame_duration = frame_end - frame_start
-            if frame_duration < 0.1: continue
+            if frame_duration < 0.1:
+                continue
             if frame_duration <= 1.50:
                 self.create_segment(frame_start, frame_duration, segments_idx)
-                print(f"Segment {segments_idx:04d} | {frame_start:.3f}s → {frame_end:.3f}s | durée={frame_duration:.3f}s")
+                print(
+                    f"Segment {segments_idx:04d} | {frame_start:.3f}s → {frame_end:.3f}s | durée={frame_duration:.3f}s"
+                )
                 segments_idx += 1
             else:
                 n_sub = round(frame_duration / 1.49)
-                for j in range(n_sub):
+                for _ in range(n_sub):
                     self.create_segment(frame_start, frame_duration, segments_idx)
-                    print(f"Segment {segments_idx:04d} | {frame_start:.3f}s → {frame_start + frame_duration:.3f}s | durée={(frame_end - frame_start)/n_sub:.3f}s")
+                    print(
+                        f"Segment {segments_idx:04d} | {frame_start:.3f}s → {frame_start + frame_duration:.3f}s | durée={(frame_end - frame_start) / n_sub:.3f}s"
+                    )
                     segments_idx += 1
-

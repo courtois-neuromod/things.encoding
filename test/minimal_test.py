@@ -2,10 +2,11 @@
 Script de test minimal : prédictions BOLD + latents du transformer FmriEncoder
 sur le RUN CONTINU (pas les micro-clips).
 """
-import warnings
+
 import logging
-from pathlib import Path
+import warnings
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 
@@ -53,6 +54,7 @@ if __name__ == "__main__":
             tensor = out[0] if isinstance(out, tuple) else out
             features[name].append(tensor.detach().cpu())
             print("latent shape (B, T, H):", tensor.shape)
+
         return hook
 
     for idx, block in enumerate(fmri_enc.encoder.layers):
@@ -75,7 +77,9 @@ if __name__ == "__main__":
     print("\nAnalyse temporelle des segments :")
     for i, seg in enumerate(segments):
         # On extrait les temps réels du segment (à vérifier selon la structure exacte renvoyée par TRIBE)
-        start_time = getattr(seg, 'start', i * 100) # Fallback théorique si l'attribut diffère
+        start_time = getattr(
+            seg, "start", i * 100
+        )  # Fallback théorique si l'attribut diffère
         print(f"  Segment {i:02d} : Chronologie vidéo = {start_time} s")
 
     # --- CORRECTION : Récupération intelligente des latents ---
@@ -86,9 +90,11 @@ if __name__ == "__main__":
         # tensor_list contient autant de tenseurs que de segments traités
         # Au lieu de tout écraser avec torch.cat, on les associe à leur segment
         for i, tensor in enumerate(tensor_list):
-            seg_start = getattr(segments[i], 'start', '???')
+            seg_start = getattr(segments[i], "start", "???")
             # Le tenseur a la forme (B, T, H) où T est à 2 Hz (0.5s)
-            print(f"  -> Appartient au Segment {i} (Début: {seg_start} s) | Shape: {tuple(tensor.shape)}")
+            print(
+                f"  -> Appartient au Segment {i} (Début: {seg_start} s) | Shape: {tuple(tensor.shape)}"
+            )
 
         # Si tu as besoin de tout empiler à la fin pour l'Étape 3 :
         stacked = torch.cat(tensor_list, dim=0)

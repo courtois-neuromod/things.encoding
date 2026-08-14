@@ -1,11 +1,11 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Simulation des données
 n_voxels = 1000
-n_folds  = 5
+n_folds = 5
 
 grille_alphas = np.logspace(1, 20, 20)
 
@@ -25,11 +25,19 @@ def plot_alphas_histogram(alphas_finaux, grille_alphas, alphas_fold=None):
     if alphas_fold is None:
         log10_valeurs = np.log10(alphas_finaux)
         df = pd.DataFrame({"log10_alpha": log10_valeurs})
-        hue_params = {"color": "#d73027", "kde": True, "kde_kws": {"bw_adjust": 0.5}, "line_kws": {"linewidth": 2}}
+        hue_params = {
+            "color": "#d73027",
+            "kde": True,
+            "kde_kws": {"bw_adjust": 0.5},
+            "line_kws": {"linewidth": 2},
+        }
         titre = "Distribution des alphas moyens"
     else:
-        rows = [{"log10_alpha": np.log10(v), "fold": f"fold_{i+1}"}
-                for i, fold in enumerate(alphas_fold) for v in fold]
+        rows = [
+            {"log10_alpha": np.log10(v), "fold": f"fold_{i + 1}"}
+            for i, fold in enumerate(alphas_fold)
+            for v in fold
+        ]
         df = pd.DataFrame(rows)
         log10_valeurs = np.log10(alphas_fold.flatten())
         hue_params = {"hue": "fold", "multiple": "stack", "palette": "tab20"}
@@ -38,7 +46,9 @@ def plot_alphas_histogram(alphas_finaux, grille_alphas, alphas_fold=None):
     # Limites et ticks communs
     xlim_min = log10_valeurs.min() - step / 2
     xlim_max = log10_valeurs.max() + step / 2
-    ticks_visibles = log10_grille[(log10_grille >= xlim_min) & (log10_grille <= xlim_max)]
+    ticks_visibles = log10_grille[
+        (log10_grille >= xlim_min) & (log10_grille <= xlim_max)
+    ]
 
     # Figure
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -52,5 +62,6 @@ def plot_alphas_histogram(alphas_finaux, grille_alphas, alphas_fold=None):
     plt.tight_layout()
     plt.show()
     plt.close()
+
 
 plot_alphas_histogram(alphas_finaux, grille_alphas, alphas_fold)

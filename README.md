@@ -29,6 +29,8 @@ validation croisée** différents et compare ce qu'ils donnent (cf. [Validation 
 - [Validation croisée](#validation-croisée)
 - [Sorties et figures](#sorties-et-figures)
 - [Continuer le projet](#continuer-le-projet)
+- [Faire tourner la Ridge sur GPU](#faire-tourner-la-ridge-sur-gpu)
+- [Qualité et style du code](#qualité-et-style-du-code)
 
 ---
 
@@ -128,7 +130,8 @@ grise (`_label-GMfromFS_desc-indivFunc_mask.nii.gz`) nécessaires aux cartes cé
 - [**uv**](https://docs.astral.sh/uv/getting-started/installation/)
 - **ffmpeg** et **ffprobe** accessibles dans le `PATH` (conversion vidéo, lecture des durées)
 - Un compte HuggingFace avec accès au modèle *gated* [`facebook/tribev2`](https://huggingface.co/facebook/tribev2)
-- Un **GPU CUDA** pour l'extraction des latents (l'analyse Ridge, elle, tourne sur CPU)
+- Un **GPU CUDA** pour l'extraction des latents. L'analyse Ridge tourne sur CPU par défaut,
+  et peut être basculée sur GPU — cf. [Faire tourner la Ridge sur GPU](#faire-tourner-la-ridge-sur-gpu)
 
 ### Mise en place
 
@@ -299,17 +302,21 @@ Coûteuse (triple boucle, aucun raccourci algébrique), c'est la référence de 
 ### 2. `nested_cross_validation_ridgecv_loo`
 
 Jumeau *sklearn-natif* de la précédente : même découpage externe, mais la boucle interne est
-remplacée par
+remplacée par un `RidgeCV` (cf. `RidgeRegression._ajuster_ridgecv`) :
 
 ```python
-TransformedTargetRegressor(
-    regressor=make_pipeline(
-        StandardScaler(),
-        RidgeCV(alphas=grille_alphas, alpha_per_target=True, cv=None, scoring="r2"),
-    ),
-    transformer=StandardScaler(),
+scaler_Y = StandardScaler()
+modele = make_pipeline(
+    StandardScaler(),
+    RidgeCV(alphas=grille_alphas, alpha_per_target=True, cv=None, scoring="r2"),
 )
+modele.fit(X_train, scaler_Y.fit_transform(Y_train))
+Y_pred = scaler_Y.inverse_transform(modele.predict(X_test))
 ```
+
+La standardisation de `Y` est explicite plutôt que déléguée à un
+`TransformedTargetRegressor` : ce dernier reconvertit `y` en numpy et perd le périphérique,
+ce qui rendait le calcul sur GPU impossible. Les opérations et les résultats sont identiques.
 
 `cv=None` déclenche le LOO analytique (validation croisée généralisée), incomparablement plus
 rapide. **Nuance importante** : ce LOO se fait *par point temporel*, là où la version manuelle
@@ -479,6 +486,7 @@ LAYER                 = "encoder_layer7_ffn"
 flag_delai_bold_brute = True               # décalage −5 s ; False → convolution HRF
 centrage_donne_temps  = False
 flag_precision_voxel  = False              # False → 1134 parcelles ; True → voxels
+flag_gpu              = False              # True → régressions sur GPU, cf. plus bas
 alphas                = np.logspace(-1, 10, 20)
 ```
 
@@ -514,12 +522,61 @@ scope_detaille  = "toutes_parcelles"   # quel scope reçoit la planche complète
 Chaque méthode produit donc **une planche détaillée et une figure de comparaison**, quel que
 soit le nombre de scopes.
 
+### Faire tourner la Ridge sur GPU
+
+`flag_gpu = True` bascule les régressions sur GPU via le [support de l'API Array de
+scikit-learn](https://scikit-learn.org/stable/modules/array_api.html). **Les résultats sont
+les mêmes** — alphas identiques, R² et Pearson à la précision `float32` près ; seul le temps
+de calcul change.
+
+C'est pensé pour la **précision voxel**. En parcelles, `Y` pèse 0,2 Go et le calcul passe
+déjà bien sur CPU ; en voxels il pèse ~17 Go et chaque fold enchaîne une SVD sur
+`X (40 470, 1152)` puis un balayage de 20 alphas sur 104 007 cibles.
+
+Le flag est sans danger :
+
+- **aucun GPU disponible** → message explicite, l'analyse continue sur CPU ;
+- **mémoire GPU insuffisante** → l'empreinte estimée est affichée, puis repli sur CPU. Mieux
+  vaut ça qu'un `CUDA out of memory` au milieu d'un job de plusieurs heures ;
+- **sur MPS** (Apple Silicon) `aten::_linalg_eigh` n'est pas implémenté et retombe sur CPU :
+  le gain y est moindre que sur CUDA.
+
+Deux variables d'environnement sont nécessaires, et doivent être posées **avant** l'import de
+scipy et de torch. `RidgeRegression.py` les pose lui-même en tête de module, ce qui suffit
+quand il est le point d'entrée ; dans un script SLURM, mieux vaut les exporter explicitement :
+
+```bash
+export SCIPY_ARRAY_API=1              # sans elle, sklearn refuse d'activer l'API Array
+export PYTORCH_ENABLE_MPS_FALLBACK=1  # utile sur Mac uniquement, sans effet sur CUDA
+```
+
+Aucune dépendance supplémentaire : `torch` est déjà requis par l'extraction, et scikit-learn
+1.9 n'a pas besoin de `array-api-compat`.
+
+### Qualité et style du code
+
+Le projet est formaté et vérifié par [ruff](https://docs.astral.sh/ruff/), piloté par
+[pre-commit](https://pre-commit.com). La configuration vit dans `[tool.ruff]` de
+[`pyproject.toml`](pyproject.toml) et dans [`.pre-commit-config.yaml`](.pre-commit-config.yaml).
+
+```bash
+uv run pre-commit install          # une fois par clone : le contrôle tourne à chaque commit
+uv run pre-commit run --all-files  # passage manuel sur tout le dépôt
+uv run ruff format src test        # formatage seul
+uv run ruff check src test --fix   # lint + corrections automatiques
+```
+
+Conventions retenues : 88 colonnes, guillemets doubles, indentation à 4 espaces, imports triés
+(`I`), et les familles de règles `E`/`F`/`B`/`UP`. `E501` est ignoré — le formateur possède
+déjà la longueur de ligne, et la règle ne se déclencherait plus que sur ce qu'il ne peut pas
+couper. Deux fichiers ignorent `E402`, avec la raison en commentaire dans `pyproject.toml`.
+
 ### Points d'extension
 
 | Objectif | Où intervenir |
 |---|---|
 | Tester une autre couche TRIBE | changer `LAYER` — toutes les couches sont déjà dans le HDF5, aucune ré-extraction nécessaire |
-| Passer en voxelwise | `flag_precision_voxel = True` (fichiers ~16 Go, prévoir la mémoire) |
+| Passer en voxelwise | `flag_precision_voxel = True` (fichiers ~16 Go, prévoir la mémoire) ; envisager `flag_gpu = True` |
 | Ajouter un schéma de validation croisée | nouvelle méthode `nested_cross_validation_*` renvoyant un `ResultatsCV` ; les champs optionnels laissés à `None` font simplement sauter les figures correspondantes |
 | Ajouter une figure | nouvelle méthode de `VisualisationResultats`, appelée depuis `generer_toutes_les_figures` et ajoutée à `liste_chemins_figures` pour entrer dans la planche |
 | Comparer d'autres zones cérébrales | ajouter une entrée à `scopes` — aucune CV supplémentaire, le scope est dérivé du passage existant tant qu'il est inclus dans `scope_cv` |

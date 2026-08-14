@@ -3,38 +3,49 @@ Extraction des représentations latentes de TRIBE v2 sur toutes les vidéos de f
 Parcourt le dossier de stimuli d'une saison, passe chaque vidéo à TribeModel avec
 forward hooks, et sauvegarde les activations en HDF5.
 """
-import warnings
+
 import argparse
-import logging
-import h5py
-import torch
-from pathlib import Path
 import gc
 import time
+from pathlib import Path
 
-from TransformerHooks import TransformerHooks
+import h5py
+import torch
+
 from Config import Config
 from HDF5Writer import HDF5Writer
+from TransformerHooks import TransformerHooks
+
 
 def sync_time():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     return time.perf_counter()
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Extraction des latents TRIBE v2')
-    parser.add_argument('--season', type=int, required=True, help='Identifiant de la saison à traiter')
-    parser.add_argument('--episode', type=int, required=True, help="Identifiant de l'episode à traiter")
-    parser.add_argument('--partieEpisode', type=str, required=True, help='Identifiant de la parrtie d\'episode')
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Extraction des latents TRIBE v2")
+    parser.add_argument(
+        "--season", type=int, required=True, help="Identifiant de la saison à traiter"
+    )
+    parser.add_argument(
+        "--episode", type=int, required=True, help="Identifiant de l'episode à traiter"
+    )
+    parser.add_argument(
+        "--partieEpisode",
+        type=str,
+        required=True,
+        help="Identifiant de la parrtie d'episode",
+    )
     args = parser.parse_args()
     season = args.season
     episode = args.episode
     partie = args.partieEpisode
 
-    #warnings.filterwarnings("ignore")
-    #logging.disable(logging.CRITICAL)
+    # warnings.filterwarnings("ignore")
+    # logging.disable(logging.CRITICAL)
 
-    plateforme = ['Rorqual', 'Mac']
+    plateforme = ["Rorqual", "Mac"]
     plateforme = plateforme[0]
 
     if plateforme == "Rorqual":
@@ -51,19 +62,24 @@ if __name__ == '__main__':
         plateforme=plateforme,
     )
     config.charger_env()
-    print(f"Env chargé", flush=True)
+    print("Env chargé", flush=True)
 
     t0 = sync_time()
     model = config.charger_modele()
     t_charge = sync_time() - t0
     print(f"Modèle chargé en {t_charge:.2f} secondes", flush=True)
-    fmri_enc = model.__pydantic_private__['_model']
+    fmri_enc = model.__pydantic_private__["_model"]
 
     t1 = sync_time()
     writer = HDF5Writer(HDF5_DIR)
-    video_files = sorted(DATA_DIR.glob(f"friends_s{season:02d}e{episode:02d}{partie}.mkv"))
+    video_files = sorted(
+        DATA_DIR.glob(f"friends_s{season:02d}e{episode:02d}{partie}.mkv")
+    )
     t_recherche_video = sync_time() - t1
-    print(f"Saison {season} --> {len(video_files)} vidéo trouvées en {t_recherche_video:.2f} secondes", flush=True)
+    print(
+        f"Saison {season} --> {len(video_files)} vidéo trouvées en {t_recherche_video:.2f} secondes",
+        flush=True,
+    )
 
     t_script_start = sync_time()
     episode_str = f"s{season:02d}e{episode:02d}{partie}"  # ex. "s01e01a"
@@ -73,7 +89,7 @@ if __name__ == '__main__':
     run_path = f"{episode_str}"
     if output_path.exists():
         with h5py.File(output_path, "r") as hf:
-            if run_path in hf and 'preds' in hf[run_path]:
+            if run_path in hf and "preds" in hf[run_path]:
                 print(f"{episode_str} déjà traité")
                 exit(0)
     try:
@@ -101,7 +117,10 @@ if __name__ == '__main__':
         print(f"Video enregistré en {t_enregistrement:.2f} secondes", flush=True)
 
         t_vid_total = sync_time() - t_vid_start
-        print(f"{episode_str} traité en {t_vid_total:.2f} secondes - preds shape: {preds.shape}", flush=True)
+        print(
+            f"{episode_str} traité en {t_vid_total:.2f} secondes - preds shape: {preds.shape}",
+            flush=True,
+        )
 
         # Nettoyage de la mémoire pour la vidéo suivante
         del features, preds, segments, events, hooks

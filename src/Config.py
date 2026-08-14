@@ -1,10 +1,11 @@
 import os
-from dotenv import load_dotenv
-from tribev2 import TribeModel
-from huggingface_hub import login
 
-class Config():
-    
+from dotenv import load_dotenv
+from huggingface_hub import login
+from tribev2 import TribeModel
+
+
+class Config:
     def __init__(self, plateforme):
         self.plateforme = plateforme
 
@@ -20,7 +21,7 @@ class Config():
             print("Mode offline : login HuggingFace ignoré, utilisation du cache.")
 
     def charger_modele(self):
-        if self.plateforme == ('Mac'):
+        if self.plateforme == ("Mac"):
             self.model = TribeModel.from_pretrained(
                 "facebook/tribev2",
                 cache_folder="./cache",

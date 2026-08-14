@@ -1,9 +1,10 @@
-import subprocess
 from pathlib import Path
+
 import pandas as pd
+
 from VideoSegmenteur import VideoSegmenteur
 
-plateforme = ['Rorqual', 'Mac']
+plateforme = ["Rorqual", "Mac"]
 plateforme = plateforme[0]  # [0] pour Rorqual, [1] pour Mac
 
 if plateforme == "Rorqual":
@@ -40,9 +41,9 @@ for path_tsv in tsv_files:
         print(f"Vidéo introuvable : {path_video.name}, on passe au suivant.")
         continue
 
-    df = pd.read_csv(path_tsv, sep='\t')
+    df = pd.read_csv(path_tsv, sep="\t")
 
-    for idx, row in df.iterrows():
+    for _idx, row in df.iterrows():
         valeur_image = str(row.iloc[1])
         if pd.isna(valeur_image) or valeur_image == "nan":
             continue

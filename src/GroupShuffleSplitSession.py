@@ -54,7 +54,7 @@ class GroupShuffleSplitSession:
         for _ in range(self.n_splits):
             shuffled = rng.permutation(sessions_uniques)
             test_sessions = shuffled[:nb_test]
-            train_sessions = shuffled[nb_test:nb_test + nb_train]
+            train_sessions = shuffled[nb_test : nb_test + nb_train]
 
             # Scikit-learn attend les index des lignes (et non les IDs des sessions)
             train_idx = np.where(np.isin(groups, train_sessions))[0]

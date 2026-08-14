@@ -22,6 +22,7 @@ d'après alignement (~180 TR), et les runs écartés par create_X_Y_total (vidé
 manquante, dataset BOLD absent) sont ici présents. Ça valide la logique de split,
 pas les tailles exactes du pipeline.
 """
+
 import sys
 from pathlib import Path
 
@@ -29,13 +30,16 @@ import h5py
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from litcoder_folding import create_chunked_folds_trimmed, create_kfold_trimmed
-from GroupShuffleSplitSession import GroupShuffleSplitSession
 from GroupShuffleSplitRun import GroupShuffleSplitRun
+from GroupShuffleSplitSession import GroupShuffleSplitSession
+from litcoder_folding import create_chunked_folds_trimmed, create_kfold_trimmed
 
 CHEMIN_BOLD = (
     Path(__file__).resolve().parent.parent
-    / "data" / "timeseries" / "cneuromod2026" / "sub-01"
+    / "data"
+    / "timeseries"
+    / "cneuromod2026"
+    / "sub-01"
     / "sub-01_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
 )
 
@@ -82,11 +86,24 @@ def runs_voisins_en_train(train_idx, test_idx, run_ids):
     return len(runs_train & voisins)
 
 
-def analyser_chunked(n_samples, run_ids, n_folds=5, trim_size=5, seed=0,
-                     chunk_length=None, runs=None, titre=""):
+def analyser_chunked(
+    n_samples,
+    run_ids,
+    n_folds=5,
+    trim_size=5,
+    seed=0,
+    chunk_length=None,
+    runs=None,
+    titre="",
+):
     folds = create_chunked_folds_trimmed(
-        n_samples, n_folds, chunk_length, trim_size=trim_size, shuffle=True,
-        rng=np.random.default_rng(seed), runs=runs,
+        n_samples,
+        n_folds,
+        chunk_length,
+        trim_size=trim_size,
+        shuffle=True,
+        rng=np.random.default_rng(seed),
+        runs=runs,
     )
     print(f"\n--- {titre} | trim_size={trim_size} | n_folds={n_folds} ---")
     runs_testes = []
@@ -94,21 +111,31 @@ def analyser_chunked(n_samples, run_ids, n_folds=5, trim_size=5, seed=0,
         train_idx, test_idx = np.array(train_idx), np.array(test_idx)
         n_coupes = runs_coupes_par_le_split(train_idx, test_idx, run_ids)
         runs_testes.extend(set(run_ids[test_idx]))
-        print(f"  Fold {i+1}: train={len(train_idx):5d}  test={len(test_idx):5d}  "
-              f"runs coupés train/test={n_coupes}")
-    print(f"  -> runs testés au total : {len(runs_testes)} (doublons : "
-          f"{len(runs_testes) - len(set(runs_testes))})")
+        print(
+            f"  Fold {i + 1}: train={len(train_idx):5d}  test={len(test_idx):5d}  "
+            f"runs coupés train/test={n_coupes}"
+        )
+    print(
+        f"  -> runs testés au total : {len(runs_testes)} (doublons : "
+        f"{len(runs_testes) - len(set(runs_testes))})"
+    )
 
 
-def analyser_splitter(splitter, groupes_split, run_ids, n_samples, titre, buffer_attendu):
+def analyser_splitter(
+    splitter, groupes_split, run_ids, n_samples, titre, buffer_attendu
+):
     print(f"\n--- {titre} ---")
-    for i, (train_idx, test_idx) in enumerate(splitter.split(None, None, groupes_split)):
+    for i, (train_idx, test_idx) in enumerate(
+        splitter.split(None, None, groupes_split)
+    ):
         n_coupes = runs_coupes_par_le_split(train_idx, test_idx, run_ids)
         n_voisins = runs_voisins_en_train(train_idx, test_idx, run_ids)
         ecartes = n_samples - len(train_idx) - len(test_idx)
-        print(f"  Fold {i+1}: train={len(train_idx):5d} ({len(set(run_ids[train_idx])):3d} runs)  "
-              f"test={len(test_idx):5d} ({len(set(run_ids[test_idx])):3d} runs)  "
-              f"écartés={ecartes:5d}  runs coupés={n_coupes}  voisins en train={n_voisins}")
+        print(
+            f"  Fold {i + 1}: train={len(train_idx):5d} ({len(set(run_ids[train_idx])):3d} runs)  "
+            f"test={len(test_idx):5d} ({len(set(run_ids[test_idx])):3d} runs)  "
+            f"écartés={ecartes:5d}  runs coupés={n_coupes}  voisins en train={n_voisins}"
+        )
     if buffer_attendu:
         print("  -> attendu : voisins en train = 0, écartés > 0 (buffer actif)")
     else:
@@ -119,41 +146,61 @@ if __name__ == "__main__":
     n_samples, groupes, run_ids, runs_labels = charger_structure_reelle(CHEMIN_BOLD)
     n_sessions = len(set(groupes))
     n_runs = len(set(run_ids))
-    print(f"sub-01 : n_samples={n_samples}  n_sessions={n_sessions}  n_runs={n_runs}  "
-          f"(chaque run = 190 TR bruts, exactement, vérifié sur les {n_runs} runs)")
+    print(
+        f"sub-01 : n_samples={n_samples}  n_sessions={n_sessions}  n_runs={n_runs}  "
+        f"(chaque run = 190 TR bruts, exactement, vérifié sur les {n_runs} runs)"
+    )
 
     # Cas 1 : découpage par RUN réel -> les chunks sont les runs, donc aucun run ne
     # peut être coupé, quelle que soit sa longueur.
-    analyser_chunked(n_samples, run_ids, runs=runs_labels,
-                     titre="chunked_trimmed | chunks = RUNS réels (runs=...)")
+    analyser_chunked(
+        n_samples,
+        run_ids,
+        runs=runs_labels,
+        titre="chunked_trimmed | chunks = RUNS réels (runs=...)",
+    )
 
     # Cas 2 : chunk_length aligné sur la longueur d'un run (190 TR) -> les chunks ne
     # tombent pas à cheval sur deux runs ici, mais uniquement parce que tous les runs
     # font exactement 190 TR dans le fichier BRUT. Après alignement ce n'est plus
     # garanti : c'est précisément ce que le cas 1 rend robuste.
-    analyser_chunked(n_samples, run_ids, chunk_length=190,
-                     titre="chunked_trimmed | chunk_length=190 (= 1 run brut)")
+    analyser_chunked(
+        n_samples,
+        run_ids,
+        chunk_length=190,
+        titre="chunked_trimmed | chunk_length=190 (= 1 run brut)",
+    )
 
     # Cas 3 : chunk_length "naïf" (ex. 50 TR, valeur typique vue dans des configs
     # litcoder pour des scans continus) -> aucune raison de tomber sur une frontière
     # de run, donc contamination attendue.
-    analyser_chunked(n_samples, run_ids, chunk_length=50,
-                     titre="chunked_trimmed | chunk_length=50 (naïf)")
+    analyser_chunked(
+        n_samples,
+        run_ids,
+        chunk_length=50,
+        titre="chunked_trimmed | chunk_length=50 (naïf)",
+    )
 
     # Cas 4 : kfold_trimmed (pas de notion de chunk/session du tout, juste un split
     # contigu du vecteur concaténé + trim aux bords de CHAQUE fold, pas de chaque run)
-    print(f"\n--- kfold_trimmed (KFold contigu global, trim_size=5) ---")
-    for i, (train_idx, test_idx) in enumerate(create_kfold_trimmed(n_samples, 5, trim_size=5)):
+    print("\n--- kfold_trimmed (KFold contigu global, trim_size=5) ---")
+    for i, (train_idx, test_idx) in enumerate(
+        create_kfold_trimmed(n_samples, 5, trim_size=5)
+    ):
         train_idx, test_idx = np.array(train_idx), np.array(test_idx)
         n_coupes = runs_coupes_par_le_split(train_idx, test_idx, run_ids)
-        print(f"  Fold {i+1}: train={len(train_idx):5d}  test={len(test_idx):5d}  "
-              f"runs coupés train/test={n_coupes}")
+        print(
+            f"  Fold {i + 1}: train={len(train_idx):5d}  test={len(test_idx):5d}  "
+            f"runs coupés train/test={n_coupes}"
+        )
 
     # Cas 5 : tirage par session, sans buffer (le buffer d'adjacence a été retiré :
     # entre deux sessions il y a plusieurs jours, il ne protégeait de rien).
     analyser_splitter(
         GroupShuffleSplitSession(n_splits=5, test_size=0.1, random_state=0),
-        groupes, run_ids, n_samples,
+        groupes,
+        run_ids,
+        n_samples,
         "GroupShuffleSplitSession | test_size=0.1 (niveau session, sans buffer)",
         buffer_attendu=False,
     )
@@ -161,7 +208,9 @@ if __name__ == "__main__":
     # Cas 6 : LORO aléatoire, plusieurs runs par fold, avec buffer.
     analyser_splitter(
         GroupShuffleSplitRun(n_splits=5, test_size=0.1, random_state=0),
-        runs_labels, run_ids, n_samples,
+        runs_labels,
+        run_ids,
+        n_samples,
         "GroupShuffleSplitRun | test_size=0.1 (21 runs de test attendus)",
         buffer_attendu=True,
     )
@@ -169,7 +218,9 @@ if __name__ == "__main__":
     # Cas 7 : LORO strict — 1 seul run en test, 2 runs écartés en buffer.
     analyser_splitter(
         GroupShuffleSplitRun(n_splits=5, test_size=1, random_state=0),
-        runs_labels, run_ids, n_samples,
+        runs_labels,
+        run_ids,
+        n_samples,
         "GroupShuffleSplitRun | test_size=1 (LORO strict)",
         buffer_attendu=True,
     )
@@ -180,7 +231,9 @@ if __name__ == "__main__":
     # — il vient des runs frères de la session testée, restés en train ici.
     analyser_splitter(
         GroupShuffleSplitRun(n_splits=5, test_size=0.1, random_state=0, n_buffer=0),
-        runs_labels, run_ids, n_samples,
+        runs_labels,
+        run_ids,
+        n_samples,
         "GroupShuffleSplitRun | test_size=0.1, n_buffer=0 (contrôle : voisins en train attendus)",
         buffer_attendu=False,
     )
@@ -188,15 +241,28 @@ if __name__ == "__main__":
     # Cas 9 : garde-fous (doivent lever, pas passer silencieusement).
     print("\n--- Garde-fous ---")
     for description, appel in [
-        ("runs désaligné sur n_samples",
-         lambda: create_chunked_folds_trimmed(n_samples + 1, 5, None, runs=runs_labels)),
-        ("n_folds > nombre de runs en mode run",
-         lambda: create_chunked_folds_trimmed(n_samples, n_runs + 1, None, runs=runs_labels)),
+        (
+            "runs désaligné sur n_samples",
+            lambda: create_chunked_folds_trimmed(
+                n_samples + 1, 5, None, runs=runs_labels
+            ),
+        ),
+        (
+            "n_folds > nombre de runs en mode run",
+            lambda: create_chunked_folds_trimmed(
+                n_samples, n_runs + 1, None, runs=runs_labels
+            ),
+        ),
         # n_runs-1 runs en test : l'unique run de train est forcément voisin d'un run
         # de test, donc le buffer le retire et le train est vide.
-        ("buffer vidant le train",
-         lambda: list(GroupShuffleSplitRun(n_splits=1, test_size=n_runs - 1, random_state=0)
-                      .split(None, None, runs_labels))),
+        (
+            "buffer vidant le train",
+            lambda: list(
+                GroupShuffleSplitRun(
+                    n_splits=1, test_size=n_runs - 1, random_state=0
+                ).split(None, None, runs_labels)
+            ),
+        ),
     ]:
         try:
             appel()

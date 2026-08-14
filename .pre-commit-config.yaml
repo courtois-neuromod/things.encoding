@@ -1,0 +1,40 @@
+# Voir https://pre-commit.com pour l'outil, https://pre-commit.com/hooks.html pour les hooks.
+#
+# Installation, une fois par clone :
+#     uv run pre-commit install
+# Passage manuel sur tout le dépôt :
+#     uv run pre-commit run --all-files
+#
+# Adapté de https://github.com/fmralign/fmralign/blob/main/.pre-commit-config.yaml.
+# Écartés à dessein : codespell (dictionnaire anglais, ce dépôt est commenté en
+# français), markdownlint (MD013 à 80 colonnes bloquerait le README), les hooks RST et
+# blacken-docs (aucun .rst, aucun doctest dans le projet).
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-ast
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
+    rev: v2.16.0
+    hooks:
+      - id: pretty-format-toml
+        args: [--autofix, --indent, '4']
+        # uv.lock est généré : uv le réécrit dans son propre format à chaque `uv sync`,
+        # le reformater ici ne ferait qu'ajouter du bruit dans les diffs.
+        exclude: ^uv\.lock$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.3
+    hooks:
+      - id: ruff-check
+        args: [--fix, --show-fixes]
+      - id: ruff-format

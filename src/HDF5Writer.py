@@ -2,7 +2,9 @@
 Sauvegarde des représentations latentes extraites de TRIBE v2 en HDF5.
 Structure : sujet / session / run / couche
 """
+
 from pathlib import Path
+
 import h5py
 import numpy as np
 
@@ -44,13 +46,13 @@ class HDF5Writer:
         output_path = self.output_dir / f"{subject}.h5"
         group_path = f"{session}/{run}" if run is not None else session
 
-        with h5py.File(output_path, 'a') as hf:
+        with h5py.File(output_path, "a") as hf:
             group = hf.require_group(group_path)
 
             # Sauvegarde des prédictions BOLD
-            if 'preds' in group:
-                del group['preds']
-            group.create_dataset('preds', data=preds)
+            if "preds" in group:
+                del group["preds"]
+            group.create_dataset("preds", data=preds)
 
             # Sauvegarde des latents par couche
             for safe_name, array in features.items():

@@ -1,6 +1,6 @@
 import os
-import time
 import random
+
 from moviepy import VideoFileClip
 from PIL import Image
 
@@ -11,7 +11,9 @@ def tester_get_frame(chemin_video, dossier_sortie="../output/analysis/test_frame
     # 1. Chargement de la vidéo
     try:
         video = VideoFileClip(chemin_video)
-        print(f"[OK] Vidéo chargée. Durée théorique : {video.duration}s | FPS : {video.fps}")
+        print(
+            f"[OK] Vidéo chargée. Durée théorique : {video.duration}s | FPS : {video.fps}"
+        )
     except Exception as e:
         print(f"[ERREUR] Impossible de charger la vidéo : {e}")
         return
@@ -24,7 +26,9 @@ def tester_get_frame(chemin_video, dossier_sortie="../output/analysis/test_frame
 
     # On tire 20 temps au hasard, en évitant la toute dernière milliseconde
     # On les trie pour optimiser la lecture séquentielle avec ffmpeg
-    temps_export = sorted([random.uniform(0, max(0, video.duration - 0.1)) for _ in range(nb_captures)])
+    temps_export = sorted(
+        [random.uniform(0, max(0, video.duration - 0.1)) for _ in range(nb_captures)]
+    )
 
     for i, t in enumerate(temps_export):
         try:
@@ -35,7 +39,9 @@ def tester_get_frame(chemin_video, dossier_sortie="../output/analysis/test_frame
             img.save(chemin_image)
             print(f"  [SUCCÈS] Image {i + 1:02d}/20 exportée : {nom_fichier}")
         except Exception as e:
-            print(f"  [ÉCHEC] Impossible d'exporter l'image {i + 1:02d}/20 à {t:.2f}s : {e}")
+            print(
+                f"  [ÉCHEC] Impossible d'exporter l'image {i + 1:02d}/20 à {t:.2f}s : {e}"
+            )
 
     video.close()
     print("\n--- Tests terminés ---")
@@ -49,4 +55,6 @@ if __name__ == "__main__":
     if os.path.exists(FICHIER_TEST):
         tester_get_frame(FICHIER_TEST)
     else:
-        print(f"Veuillez définir un chemin de vidéo valide (actuellement : {FICHIER_TEST})")
+        print(
+            f"Veuillez définir un chemin de vidéo valide (actuellement : {FICHIER_TEST})"
+        )
