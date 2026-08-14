@@ -1203,12 +1203,17 @@ if __name__ == "__main__":
         # Zones cérébrales à analyser ("scopes"), différentes selon la précision :
         # les ROIs voxelwise (fichier ROImask) et les réseaux Yeo-7 par parcelle
         # (fichier d'annotations de l'atlas cneuromod26) ne sont pas la même chose.
+        # `composition_scopes` légende la figure de comparaison : sans elle, un scope
+        # nommé "ROIs" ou "visuelles" ne dit pas quelles aires il recouvre. On réutilise
+        # les MÊMES constantes que les masques ci-dessus, jamais une liste recopiée à la
+        # main, sinon la légende finirait par mentir sur ce qui a été calculé.
         if flag_precision_voxel:
             masque_rois = ridge._charger_masque_roi(ROIS_RETINOTOPIQUES + ROIS_CATEGORIELLES)
             scopes = {
                 "cerveau_entier": None,
                 "ROIs": masque_rois,
             }
+            composition_scopes = {"ROIs": ROIS_RETINOTOPIQUES + ROIS_CATEGORIELLES}
         else:
             masque_visuelles = ridge._charger_masque_parcelles(RESEAUX_PARCELLES_VISUEL)
             masque_visuelles_dorsAttn = ridge._charger_masque_parcelles(RESEAUX_PARCELLES_VISUEL_DORSATTN)
@@ -1216,6 +1221,10 @@ if __name__ == "__main__":
                 "toutes_parcelles": None,
                 "visuelles": masque_visuelles,
                 "visuelles_dorsAttn": masque_visuelles_dorsAttn,
+            }
+            composition_scopes = {
+                "visuelles": RESEAUX_PARCELLES_VISUEL,
+                "visuelles_dorsAttn": RESEAUX_PARCELLES_VISUEL_DORSATTN,
             }
 
         # `seed` est fixé pour que les variantes soient comparables entre elles :
@@ -1260,7 +1269,20 @@ if __name__ == "__main__":
             # `_selection_X_Y` -> `create_X_Y_total()` qui domine le temps d'exécution.
             resultats = executer(scope_cv)
 
-            # 1. Planche détaillée, sur le seul scope désigné.
+            # 1. Synthèse des scopes, sans aucune CV en plus : ce sont les mêmes
+            # résultats restreints à des sous-ensembles de colonnes. Calculée d'abord,
+            # car elle est passée à la planche, qui l'intègre au lieu d'un second PNG.
+            r2_par_scope, pearson_par_scope = {}, {}
+            for nom_scope, masque in scopes.items():
+                if not scope_disponible(masque, scope_cv):
+                    print(f"  -> scope {nom_scope} ignoré : hors du scope de CV.")
+                    continue
+                restreints = resultats.restreindre(masque_relatif(masque, scope_cv))
+                r2_par_scope[nom_scope] = restreints.r2_tous_les_tests
+                if restreints.pearson_tous_les_tests is not None:
+                    pearson_par_scope[nom_scope] = restreints.pearson_tous_les_tests
+
+            # 2. Planche UNIQUE : figures détaillées du scope désigné + comparaison.
             masque_detaille = scopes[scope_detaille]
             if not scope_disponible(masque_detaille, scope_cv):
                 raise ValueError(
@@ -1272,22 +1294,9 @@ if __name__ == "__main__":
                 resultats.restreindre(masque_relatif(masque_detaille, scope_cv)),
                 alphas,
                 masque_roi=masque_detaille,
-            )
-
-            # 2. Figure de synthèse : tous les scopes comparés, sans aucune CV en plus.
-            r2_par_scope, pearson_par_scope = {}, {}
-            for nom_scope, masque in scopes.items():
-                if not scope_disponible(masque, scope_cv):
-                    print(f"  -> scope {nom_scope} ignoré : hors du scope de CV.")
-                    continue
-                restreints = resultats.restreindre(masque_relatif(masque, scope_cv))
-                r2_par_scope[nom_scope] = restreints.r2_tous_les_tests
-                if restreints.pearson_tous_les_tests is not None:
-                    pearson_par_scope[nom_scope] = restreints.pearson_tous_les_tests
-
-            figures.plot_comparaison_scopes(
-                nom_methode, r2_par_scope, pearson_par_scope or None,
-                suffix=f"_{nom_methode}",
+                r2_par_scope=r2_par_scope,
+                pearson_par_scope=pearson_par_scope or None,
+                composition_scopes=composition_scopes,
             )
 
         print(f"\nTerminé pour le sujet {SUB}. Toutes les figures ont été sauvegardées.")

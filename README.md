@@ -67,7 +67,6 @@ validation croisée** différents et compare ce qu'ils donnent (cf. [Validation 
  │  VisualisationResultats → cartes cérébrales, histogrammes, accuracy   │
  │            ▼                                                          │
  │  output/analysis/planche_<methode>_<scope>_<sujet>_<couche>.png       │
- │  output/analysis/comparaison_scopes_<sujet>_<couche>_<methode>.png    │
  └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -396,10 +395,11 @@ la revérifie.
 
 ## Sorties et figures
 
-Chaque méthode produit **deux fichiers** (300 DPI) dans `output/analysis/` : une planche
-détaillée sur un seul scope, et une figure qui compare tous les scopes entre eux.
+Chaque méthode produit **un seul fichier** (300 DPI) dans `output/analysis/` :
+`planche_<methode>_<scope>_<sujet>_<couche>.png`. Toutes les figures ci-dessous y sont
+assemblées, et les PNG individuels sont supprimés après coup.
 
-### La planche détaillée — `planche_<methode>_<scope>_<sujet>_<couche>.png`
+### Le contenu de la planche
 
 `VisualisationResultats.generer_toutes_les_figures` produit la série complète de figures
 pour le scope désigné par `scope_detaille` :
@@ -415,22 +415,45 @@ pour le scope désigné par `scope_detaille` :
    `one_cycle`, la figure comporte deux panneaux : R² à gauche, Pearson r à droite, sur des
    échelles indépendantes.
 5. **Distribution du R²** et **R² au-dessus d'un seuil**.
-6. **Histogramme par ROI** — en précision voxel et analyse cerveau entier uniquement.
+6. **Score par ROI** — en précision voxel et analyse cerveau entier uniquement. Voir
+   [Lire la figure par ROI](#lire-la-figure-par-roi).
+7. **Comparaison des scopes** — voir [Lire la comparaison des scopes](#lire-la-comparaison-des-scopes).
 
-Toutes ces figures sont ensuite assemblées en une **planche unique** sur 3 colonnes, et les
-PNG individuels sont supprimés. C'est le seul fichier à conserver.
+Les figures carrées sont rangées sur 3 colonnes ; les deux dernières, plus larges, occupent
+chacune une rangée entière — tassées dans une case carrée, leurs étiquettes seraient
+illisibles.
 
 Les résultats numériques sont aussi renvoyés sous forme de dictionnaire
 (`r2_moyen`, `r2_tous_les_tests`, `alphas_moyens`, `pearson_moyen`) pour comparer les méthodes
 entre elles.
 
-### La comparaison des scopes — `comparaison_scopes_<sujet>_<couche>_<methode>.png`
+### Lire la figure par ROI
 
-`VisualisationResultats.plot_comparaison_scopes` met les scopes côte à côte dans **une seule
-figure** : les mêmes quatre métriques que l'*accuracy* (`mean`, `median`, `top-10% mean`,
-`max`), mais une couleur par scope au lieu d'une figure par scope. Les moustaches restent
-l'écart-type inter-folds, et l'effectif de chaque scope est dans la légende. Comme pour
-l'*accuracy*, un second panneau Pearson apparaît quand la méthode en produit.
+`plot_ROImask_histogram` ventile le score moyen sur les 25 ROIs du fichier `ROImask`. Les
+ROIs sont **groupées par famille** (blocs de couleur contigus : `early`, `lateral`, `ventral`,
+`scene`, `body`, `face`, puis les réseaux Yeo entiers), les familles classées par R² moyen
+décroissant et les ROIs décroissantes à l'intérieur de chaque bloc. Chaque barre porte sa
+valeur, l'effectif est dans l'étiquette (`V1 (n=1 726)`), et un bloc de texte sous la figure
+explicite chaque abréviation.
+
+Pour `one_cycle`, la figure a deux panneaux, **R² à gauche et Pearson r à droite, dans le même
+ordre de ROIs**. C'est le point de la figure : les lignes se lisent de gauche à droite, ce qui
+fait ressortir les aires où le Pearson est élevé alors que le R² reste faible — celles dont la
+forme temporelle est bien prédite, mais pas l'amplitude.
+
+Les réseaux Yeo (`visual`, `defaultMode`…) sont toujours renvoyés en bas du classement, quel
+que soit leur score : ce sont des réseaux entiers, pas des aires du système visuel, et les
+mêler au tri reviendrait à comparer des objets de nature différente.
+
+### Lire la comparaison des scopes
+
+`plot_comparaison_scopes` met les scopes côte à côte : les mêmes quatre métriques que
+l'*accuracy* (`mean`, `median`, `top-10% mean`, `max`), mais une couleur par scope au lieu
+d'une figure par scope. Les moustaches restent l'écart-type inter-folds, et l'effectif de
+chaque scope est dans la légende. Comme pour l'*accuracy*, un second panneau Pearson apparaît
+quand la méthode en produit. Un bloc de texte sous les panneaux **détaille le contenu de
+chaque scope** — les 19 aires que recouvre `ROIs` en précision voxel, les réseaux d'atlas en
+précision parcelles.
 
 Deux points de lecture :
 

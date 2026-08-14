@@ -8,11 +8,14 @@ Elle n'importe rien de `RidgeRegression` — les chemins lui sont donnés à la 
 sous la forme d'un objet `CheminsProjet` déjà bâti. La dépendance est donc à sens unique.
 """
 from pathlib import Path
+import textwrap
 
 import h5py
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
+from PIL import Image
 from nilearn.maskers import NiftiLabelsMasker, NiftiMasker
 from nilearn.plotting import plot_stat_map
 import numpy as np
@@ -29,6 +32,48 @@ SEUIL_AFFICHAGE_BRAIN_MAP = 0.01
 # d'où deux palettes disjointes, pour qu'une couleur ne veuille pas dire deux choses
 # d'une figure à l'autre. Suite Okabe-Ito, lisible en daltonisme.
 PALETTE_SCOPES = ("#D55E00", "#CC79A7", "#F0E442", "#0072B2", "#009E73")
+
+# Nom complet de chaque ROI, pour que les abréviations des figures soient lisibles sans
+# connaître la nomenclature. Les clés correspondent aux noms des datasets du fichier
+# ROImask (groupes retinotopy_ROIs / fLoc_ROIs / yeo_ROIs) et aux constantes ROIS_* /
+# RESEAUX_PARCELLES_* de RidgeRegression. Une ROI absente d'ici s'affiche sous son seul
+# nom, sans description : le fichier ROImask peut contenir plus que ces constantes.
+DESCRIPTIONS_ROIS = {
+    # retinotopy_ROIs — aires rétinotopiques, définies par cartographie du champ visuel
+    "V1": "cortex visuel primaire",
+    "V2": "aire visuelle V2",
+    "V3": "aire visuelle V3",
+    "V3a": "aire V3a — voie dorsale, mouvement",
+    "V3b": "aire V3b — voie dorsale",
+    "hV4": "quatrième aire visuelle humaine — couleur, forme",
+    "VO1": "ventral occipital 1",
+    "VO2": "ventral occipital 2",
+    "LO1": "lateral occipital 1",
+    "LO2": "lateral occipital 2",
+    "TO1": "temporo-occipital 1 (≈ hMT) — mouvement",
+    "TO2": "temporo-occipital 2 (≈ MST) — mouvement",
+    # fLoc_ROIs — aires catégorielles, définies par localizer fonctionnel
+    "faceFFA": "fusiform face area — visages",
+    "faceOFA": "occipital face area — visages",
+    "facepSTS": "sillon temporal supérieur postérieur — visages dynamiques",
+    "bodyEBA": "extrastriate body area — corps",
+    "scenePPA": "parahippocampal place area — scènes, lieux",
+    "sceneOPA": "occipital place area — scènes",
+    "sceneMPA": "medial place area (≈ RSC) — scènes",
+    # yeo_ROIs — réseaux entiers, et réseaux de l'atlas de parcelles (mode parcelles)
+    "visual": "réseau visuel (Yeo-7)",
+    "sensorimotor": "réseau sensorimoteur (Yeo-7)",
+    "dorsalAttention": "réseau attentionnel dorsal (Yeo-7)",
+    "ventralAttention": "réseau attentionnel ventral (Yeo-7)",
+    "frontoParietal": "réseau fronto-pariétal (Yeo-7)",
+    "defaultMode": "réseau du mode par défaut (Yeo-7)",
+    "Vis": "réseau visuel (Schaefer/Yeo-7)",
+    "DorsAttn": "réseau attentionnel dorsal (Schaefer/Yeo-7)",
+}
+
+# Familles rangées en fin de classement quel que soit leur R² : ce ne sont pas des aires
+# du système visuel, les mélanger au tri ferait comparer des objets de nature différente.
+FAMILLES_HORS_CLASSEMENT = ("reseau", "autre")
 
 
 class VisualisationResultats:
@@ -152,17 +197,139 @@ class VisualisationResultats:
         plt.close(fig)
         return chemin_sauvegarde
 
-    def plot_ROImask_histogram(self, scores_finaux):
-        """Trace un barplot du R² moyen par ROI (voxelwise uniquement) et l'enregistre
-        en PNG.
+    def _ordonner_rois_par_famille(self, df):
+        """Calcule l'ordre d'affichage des ROIs et les bornes des blocs de famille.
+
+        Familles classées par R² moyen décroissant, ROIs décroissantes à l'intérieur de
+        chaque famille. Les familles de `FAMILLES_HORS_CLASSEMENT` sont renvoyées en fin
+        de liste quel que soit leur R².
+
+        Args :
+            df : DataFrame avec les colonnes "ROI", "r2_mean" et "famille".
+
+        Returns :
+            tuple : (ordre des ROIs, [(nom de famille, index de fin de bloc), ...]).
+                L'index de fin est exclu, à la façon d'une tranche Python.
+        """
+        r2_par_famille = df.groupby("famille")["r2_mean"].mean().sort_values(ascending=False)
+
+        familles_classees = [f for f in r2_par_famille.index if f not in FAMILLES_HORS_CLASSEMENT]
+        familles_classees += [f for f in FAMILLES_HORS_CLASSEMENT if f in r2_par_famille.index]
+
+        ordre, bornes = [], []
+        for famille in familles_classees:
+            rois_famille = df[df["famille"] == famille].sort_values("r2_mean", ascending=False)
+            ordre.extend(rois_famille["ROI"].tolist())
+            bornes.append((famille, len(ordre)))
+        return ordre, bornes
+
+    def _tracer_barres_roi(self, ax, df, colonne, ordre, bornes, palette, label_x, noms_familles):
+        """Trace un panneau de barres horizontales par ROI sur l'axe donné.
+
+        Args :
+            ax : axe matplotlib cible.
+            df : DataFrame "ROI" / "famille" / colonnes de scores.
+            colonne : colonne de score à tracer ("r2_mean" ou "pearson_mean").
+            ordre : ordre des ROIs, identique sur tous les panneaux (cf.
+                `_ordonner_rois_par_famille`) pour que la lecture se fasse ligne à ligne.
+            bornes : bornes des blocs de famille, pour les séparateurs.
+            palette : couleur par famille.
+            label_x : légende de l'axe X.
+            noms_familles : True pour écrire le nom des familles en marge (panneau de
+                gauche uniquement, sinon le texte se répète inutilement).
+        """
+        sns.barplot(
+            data=df, y="ROI", x=colonne, order=ordre,
+            hue="famille", palette=palette, dodge=False, ax=ax, legend=False,
+        )
+
+        # Le R² comme le Pearson peuvent être négatifs (voxels non prédits) : le zéro
+        # n'est pas forcément au bord du cadre, on le matérialise.
+        ax.axvline(0, color="grey", linewidth=0.8, alpha=0.6, zorder=0)
+
+        # Pas de barre d'erreur ici (une seule valeur par ROI), donc `bar_label` place
+        # correctement les étiquettes tout seul, y compris pour les barres négatives.
+        for container in ax.containers:
+            ax.bar_label(container, fmt="%.3f", padding=3, fontsize=8)
+        ax.margins(x=0.20)
+
+        # Séparateurs entre familles + nom de la famille en marge du bloc.
+        debut = 0
+        for famille, fin in bornes:
+            if fin < len(ordre):
+                ax.axhline(fin - 0.5, color="grey", linewidth=0.9, alpha=0.45)
+            if noms_familles:
+                ax.text(
+                    -0.34, (debut + fin - 1) / 2, famille,
+                    transform=ax.get_yaxis_transform(),
+                    ha="center", va="center", rotation=90,
+                    fontsize=9, fontweight="bold", color=palette.get(famille, "black"),
+                )
+            debut = fin
+
+        ax.grid(True, axis='x', linestyle='-', alpha=0.2, color='grey')
+        ax.set_axisbelow(True)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_xlabel(label_x, fontsize=11)
+        ax.set_ylabel("")
+
+    def _texte_descriptions_rois(self, ordre, bornes, noms_courts):
+        """Compose le bloc de texte qui explicite les abréviations des ROIs tracées.
+
+        Args :
+            ordre : étiquettes des ROIs dans l'ordre d'affichage du graphique.
+            bornes : bornes des blocs de famille (même ordre que le graphique).
+            noms_courts : {étiquette affichée: nom brut de la ROI}, le nom brut étant
+                la clé de `DESCRIPTIONS_ROIS`.
+
+        Returns :
+            str : texte monospace, deux ROIs par ligne, groupé par famille.
+        """
+        largeur_roi = max(len(noms_courts[roi]) for roi in ordre) + 1
+        entree = lambda roi: (
+            f"{noms_courts[roi]:<{largeur_roi}} {DESCRIPTIONS_ROIS.get(noms_courts[roi], '')}".rstrip()
+        )
+        # Largeur de colonne calculée sur TOUTES les entrées, pas famille par famille :
+        # sinon chaque bloc aurait sa propre colonne et le texte paraîtrait décalé.
+        largeur_colonne = max(len(entree(roi)) for roi in ordre) + 3
+
+        lignes = []
+        debut = 0
+        for famille, fin in bornes:
+            entrees = [entree(roi) for roi in ordre[debut:fin]]
+            debut = fin
+            for i in range(0, len(entrees), 2):
+                corps = "".join(e.ljust(largeur_colonne) for e in entrees[i:i + 2]).rstrip()
+                prefixe = f"{famille:<9}" if i == 0 else " " * 9
+                lignes.append(prefixe + corps)
+        return "\n".join(lignes)
+
+    def plot_ROImask_histogram(self, scores_finaux, pearson_finaux=None):
+        """Trace le score moyen par ROI (voxelwise uniquement) et l'enregistre en PNG.
+
+        Les ROIs sont groupées par famille (blocs de couleur contigus), les familles
+        classées par R² décroissant et les ROIs décroissantes à l'intérieur de chaque
+        famille. Chaque barre porte sa valeur, et un bloc de texte sous la figure
+        explicite les abréviations.
 
         Args :
             scores_finaux : R² moyen par voxel (cerveau entier, même longueur que les
                 masques du fichier ROImask).
+            pearson_finaux : corrélations de Pearson au même format, si la méthode de
+                validation croisée en produit (`one_cycle` seule) ; None = figure à un
+                seul panneau.
 
         Returns :
             Path | None : chemin du PNG sauvegardé, ou None si `flag_precision_voxel`
                 est False (analyse indisponible en précision parcelle).
+
+        Notes :
+            L'ordre des ROIs est calculé UNE fois, sur le R², et réutilisé tel quel sur
+            le panneau Pearson (`sharey=True`) : les deux panneaux se lisent alors ligne
+            à ligne, ce qui fait ressortir les ROIs où le Pearson est bon alors que le R²
+            reste faible — celles dont la forme temporelle est prédite mais pas
+            l'amplitude. Trier chaque panneau séparément casserait cette lecture.
         """
         fichier_ROImask = self.chemins.chemin_ROImask
 
@@ -198,40 +365,74 @@ class VisualisationResultats:
             "autre": "#bdbdbd",
         }
 
-        if self.flag_precision_voxel:
-            rows = []
-            with h5py.File(fichier_ROImask, 'r') as fichier:
-                for groupe in fichier.keys():
-                    for sous_cle in fichier[groupe].keys():
-                        vecteur = fichier[groupe][sous_cle][:].astype(bool)
-                        r2_roi = scores_finaux[vecteur]
-                        rows.append({
-                            "ROI": sous_cle,
-                            "r2_mean": np.mean(r2_roi),
-                            "famille": familles.get(sous_cle, "autre"),
-                        })
-
-                df = pd.DataFrame(rows).sort_values("r2_mean", ascending=True)
-
-                fig, ax = plt.subplots(figsize=(8, 10))
-                sns.barplot(
-                    data=df, y="ROI", x="r2_mean",
-                    hue="famille", palette=palette,
-                    dodge=False, ax=ax
-                )
-                ax.set_xlabel("mean R² (raw)")
-                ax.set_ylabel("")
-                ax.set_title(f"Encoding accuracy by visual ROI — {self.subject} / {self.layer}")
-                ax.legend(title="stream", bbox_to_anchor=(1.05, 1), loc="upper left")
-                plt.tight_layout()
-
-                nom_fichier = f"ROImask_{self.subject}_{self.layer}.png"
-                chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "ROImask sauvegardé", bbox_inches="tight")
-                plt.close(fig)
-                return chemin_sauvegarde
-        else:
+        if not self.flag_precision_voxel:
             print("ROImask ignoré : analyse disponible uniquement en précision voxel (flag_precision_voxel=True).")
             return None
+
+        rows = []
+        with h5py.File(fichier_ROImask, 'r') as fichier:
+            for groupe in fichier.keys():
+                for sous_cle in fichier[groupe].keys():
+                    vecteur = fichier[groupe][sous_cle][:].astype(bool)
+                    ligne = {
+                        # L'effectif est dans l'étiquette : une moyenne sur 97 voxels et
+                        # une sur 2 024 ne se lisent pas de la même façon.
+                        "ROI": f"{sous_cle} (n={int(vecteur.sum()):,})".replace(",", " "),
+                        "r2_mean": np.mean(scores_finaux[vecteur]),
+                        "famille": familles.get(sous_cle, "autre"),
+                        "nom_court": sous_cle,
+                    }
+                    if pearson_finaux is not None:
+                        ligne["pearson_mean"] = np.mean(pearson_finaux[vecteur])
+                    rows.append(ligne)
+
+        df = pd.DataFrame(rows)
+        ordre, bornes = self._ordonner_rois_par_famille(df)
+
+        if pearson_finaux is None:
+            fig, ax_r2 = plt.subplots(figsize=(9, 11))
+        else:
+            # sharey : le panneau Pearson reprend l'ordre calculé sur le R², et les noms
+            # de ROIs ne sont écrits qu'une fois, à gauche.
+            fig, (ax_r2, ax_pearson) = plt.subplots(1, 2, figsize=(15, 11), sharey=True)
+
+        self._tracer_barres_roi(ax_r2, df, "r2_mean", ordre, bornes, palette,
+                                "R² moyen (raw)", noms_familles=True)
+        if pearson_finaux is not None:
+            self._tracer_barres_roi(ax_pearson, df, "pearson_mean", ordre, bornes, palette,
+                                    "Pearson r moyen", noms_familles=False)
+
+        fig.suptitle(
+            f"Encodage par ROI visuelle — {self.subject} / {self.layer}",
+            fontsize=14, fontweight="bold",
+        )
+        # Bande réservée en haut pour la légende, qui se glisse sous le titre.
+        fig.tight_layout(rect=(0, 0, 1, 0.945))
+
+        # Légende des couleurs commune aux deux panneaux (seaborn ne la trace plus,
+        # `legend=False`). En haut plutôt qu'en bas : le bas est occupé par le bloc de
+        # descriptions, et les deux se chevaucheraient.
+        familles_tracees = [famille for famille, _ in bornes]
+        fig.legend(
+            handles=[Patch(facecolor=palette[f], label=f) for f in familles_tracees],
+            loc="upper center", bbox_to_anchor=(0.5, 0.962),
+            ncol=len(familles_tracees), frameon=False, fontsize=10,
+        )
+
+        # Bloc qui explicite les abréviations, sous la figure : `bbox_inches="tight"` à
+        # la sauvegarde englobe ce qui dépasse. `ma="left"` est indispensable — sans lui
+        # chaque ligne serait centrée indépendamment et les colonnes ne seraient plus
+        # alignées.
+        noms_courts = dict(zip(df["ROI"], df["nom_court"]))
+        fig.text(
+            0.5, -0.015, self._texte_descriptions_rois(ordre, bornes, noms_courts),
+            ha="center", ma="left", va="top", fontsize=8, family="monospace", linespacing=1.5,
+        )
+
+        nom_fichier = f"ROImask_{self.subject}_{self.layer}.png"
+        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "ROImask sauvegardé", bbox_inches="tight")
+        plt.close(fig)
+        return chemin_sauvegarde
 
     def plot_r2_threshold(self, r2_tous_les_tests, suffix=""):
         """Trace la fraction de voxels/parcelles dont le R² moyen dépasse un seuil,
@@ -447,7 +648,37 @@ class VisualisationResultats:
         ax.set_ylabel(label_y, fontsize=12)
         ax.legend(title="", fontsize=9, frameon=False)
 
-    def plot_comparaison_scopes(self, nom_methode, r2_par_scope, pearson_par_scope=None, suffix=""):
+    def _texte_composition_scopes(self, composition_scopes, scopes_traces, largeur=150):
+        """Compose le bloc de texte qui détaille le contenu de chaque scope comparé.
+
+        Args :
+            composition_scopes : {nom du scope: itérable de noms de ROIs/réseaux}.
+            scopes_traces : noms des scopes réellement présents dans la figure, dans
+                l'ordre d'affichage.
+            largeur : largeur de repli, en caractères.
+
+        Returns :
+            str : un paragraphe par scope, vide si rien à décrire.
+        """
+        paragraphes = []
+        for nom_scope in scopes_traces:
+            noms = composition_scopes.get(nom_scope)
+            # Le scope « tout le cerveau » n'a pas de composition à lister.
+            if not noms:
+                continue
+            details = ", ".join(
+                f"{nom} ({DESCRIPTIONS_ROIS[nom]})" if nom in DESCRIPTIONS_ROIS else nom
+                for nom in noms
+            )
+            entete = f"{nom_scope} ({len(tuple(noms))}) — "
+            paragraphes.append(textwrap.fill(
+                entete + details, width=largeur,
+                subsequent_indent=" " * 4,
+            ))
+        return "\n".join(paragraphes)
+
+    def plot_comparaison_scopes(self, nom_methode, r2_par_scope, pearson_par_scope=None,
+                                composition_scopes=None, suffix=""):
         """Compare les zones cérébrales analysées dans UNE figure, pour une méthode.
 
         Remplace les planches séparées par scope : mêmes métriques que `plot_accuracy`,
@@ -461,6 +692,11 @@ class VisualisationResultats:
                 Le nombre de features diffère d'un scope à l'autre, c'est attendu.
             pearson_par_scope : mêmes clés, corrélations de Pearson, si la méthode en
                 produit (`one_cycle` seule) ; None = figure à un seul panneau.
+            composition_scopes : {nom du scope: noms des ROIs/réseaux qui le composent},
+                détaillé en bloc de texte sous les panneaux. Les noms connus de
+                `DESCRIPTIONS_ROIS` sont accompagnés de leur définition. Les clés
+                absentes ne sont pas décrites — c'est le cas du scope « tout le
+                cerveau », qui n'a pas de composition à lister.
             suffix : suffixe ajouté au nom du fichier de sortie.
 
         Returns :
@@ -498,8 +734,22 @@ class VisualisationResultats:
         )
         plt.tight_layout()
 
+        # Contenu de chaque scope sous les panneaux : sans ça, un scope nommé "ROIs" ou
+        # "visuelles" ne dit pas quelles aires il recouvre. `bbox_inches="tight"`
+        # englobe ce qui dépasse ; `ma="left"` garde l'indentation du repli.
+        if composition_scopes:
+            texte = self._texte_composition_scopes(composition_scopes, list(r2_par_scope))
+            if texte:
+                fig.text(
+                    0.5, -0.02, texte,
+                    ha="center", ma="left", va="top", fontsize=8,
+                    family="monospace", linespacing=1.5,
+                )
+
         nom_fichier = f"comparaison_scopes_{self.subject}_{self.layer}{suffix}.png"
-        chemin_sauvegarde = self._sauvegarder_figure(fig, nom_fichier, "Comparaison des scopes sauvegardée")
+        chemin_sauvegarde = self._sauvegarder_figure(
+            fig, nom_fichier, "Comparaison des scopes sauvegardée", bbox_inches="tight",
+        )
         plt.close(fig)
         return chemin_sauvegarde
 
@@ -673,7 +923,8 @@ class VisualisationResultats:
         chemin_sauvegarde = self._brain_mapping_generique(tsnr, nom_carte="TSNR", cmap="Blues", treshold=0.0, echelle_log=False, vmin=0, vmax=np.percentile(tsnr, 95), suffix=suffix)
         return chemin_sauvegarde
 
-    def regrouper_figures_dans_une_planche(self, nom_methode, liste_chemins_figures, nombre_de_colonnes=3):
+    def regrouper_figures_dans_une_planche(self, nom_methode, liste_chemins_figures,
+                                           nombre_de_colonnes=3, figures_pleine_largeur=()):
         """Assemble toutes les figures PNG déjà sauvegardées pour UNE méthode de
         validation croisée dans une seule image PNG (une "planche"), au lieu d'avoir
         un fichier séparé par figure.
@@ -684,72 +935,92 @@ class VisualisationResultats:
                 `brain_mapping_alphas`, `plot_accuracy`, etc. Les entrées None (ex.
                 ROImask quand `flag_precision_voxel` est False) sont ignorées.
             nombre_de_colonnes : largeur de la grille d'assemblage.
+            figures_pleine_largeur : chemins qui occupent une rangée entière au lieu
+                d'une case. À réserver aux figures larges (ROImask à deux panneaux,
+                comparaison des scopes) : tassées dans une case carrée, leurs étiquettes
+                deviendraient illisibles.
 
         Returns :
             Path | None : chemin du fichier PNG sauvegardé, ou None si
                 `liste_chemins_figures` ne contient aucune figure valide.
         """
         # Étape 1 : on ne garde que les chemins réellement produits (pas les None).
-        chemins_valides = []
-        for chemin_figure in liste_chemins_figures:
-            if chemin_figure is not None:
-                chemins_valides.append(chemin_figure)
-
-        nombre_de_figures = len(chemins_valides)
-        if nombre_de_figures == 0:
+        chemins_valides = [c for c in liste_chemins_figures if c is not None]
+        if not chemins_valides:
             print(f"Aucune figure à regrouper pour {nom_methode}.")
             return None
 
-        # Étape 2 : on calcule le nombre de lignes nécessaires pour ranger toutes
-        # les figures dans une grille de `nombre_de_colonnes` colonnes.
-        nombre_de_lignes = nombre_de_figures // nombre_de_colonnes
-        reste_figures = nombre_de_figures % nombre_de_colonnes
-        if reste_figures != 0:
-            nombre_de_lignes = nombre_de_lignes + 1
+        pleine_largeur = {c for c in figures_pleine_largeur if c is not None}
 
-        # Étape 3 : on crée la grande figure qui contiendra une grille de sous-figures.
+        # Étape 2 : on répartit les figures en rangées. Une figure pleine largeur ferme
+        # la rangée en cours (même incomplète) et occupe seule la sienne.
+        rangees = []
+        rangee_courante = []
+        for chemin_figure in chemins_valides:
+            if chemin_figure in pleine_largeur:
+                if rangee_courante:
+                    rangees.append(rangee_courante)
+                    rangee_courante = []
+                rangees.append([chemin_figure])
+            else:
+                rangee_courante.append(chemin_figure)
+                if len(rangee_courante) == nombre_de_colonnes:
+                    rangees.append(rangee_courante)
+                    rangee_courante = []
+        if rangee_courante:
+            rangees.append(rangee_courante)
+
+        # Étape 3 : hauteur de chaque rangée. Une rangée pleine largeur est dimensionnée
+        # d'après le rapport de forme de son image (lu sans la décoder), pour ne pas
+        # l'écraser — plafonné, sinon un ROImask très haut ferait exploser la planche.
         largeur_par_case = 6
         hauteur_par_case = 6
         largeur_totale = largeur_par_case * nombre_de_colonnes
-        hauteur_totale = hauteur_par_case * nombre_de_lignes
-        figure_planche, grille_axes = plt.subplots(
-            nombre_de_lignes, nombre_de_colonnes,
-            figsize=(largeur_totale, hauteur_totale),
+
+        proportions_hauteur = []
+        for rangee in rangees:
+            if len(rangee) == 1 and rangee[0] in pleine_largeur:
+                largeur_px, hauteur_px = Image.open(rangee[0]).size
+                hauteur_voulue = largeur_totale * hauteur_px / largeur_px
+                proportions_hauteur.append(min(hauteur_voulue, 3 * hauteur_par_case) / hauteur_par_case)
+            else:
+                proportions_hauteur.append(1.0)
+
+        hauteur_totale = hauteur_par_case * sum(proportions_hauteur)
+        figure_planche = plt.figure(figsize=(largeur_totale, hauteur_totale))
+        grille = figure_planche.add_gridspec(
+            len(rangees), nombre_de_colonnes, height_ratios=proportions_hauteur,
         )
 
-        # Étape 4 : on parcourt chaque case de la grille, ligne par ligne puis
-        # colonne par colonne, et on y affiche l'image correspondante si elle existe.
-        index_figure_courante = 0
-        for numero_ligne in range(nombre_de_lignes):
-            for numero_colonne in range(nombre_de_colonnes):
+        # Étape 4 : on place chaque image dans sa case (ou sur toute la rangée).
+        for numero_ligne, rangee in enumerate(rangees):
+            if len(rangee) == 1 and rangee[0] in pleine_largeur:
+                cases = [figure_planche.add_subplot(grille[numero_ligne, :])]
+            else:
+                cases = [
+                    figure_planche.add_subplot(grille[numero_ligne, numero_colonne])
+                    for numero_colonne in range(nombre_de_colonnes)
+                ]
 
-                # Récupération de l'axe (la "case") correspondant à cette position,
-                # en tenant compte du fait que matplotlib simplifie la forme du
-                # tableau d'axes quand il n'y a qu'une seule ligne ou une seule colonne.
-                if nombre_de_lignes == 1 and nombre_de_colonnes == 1:
-                    axe_courant = grille_axes
-                elif nombre_de_lignes == 1:
-                    axe_courant = grille_axes[numero_colonne]
-                elif nombre_de_colonnes == 1:
-                    axe_courant = grille_axes[numero_ligne]
-                else:
-                    axe_courant = grille_axes[numero_ligne, numero_colonne]
+            for case, chemin_image in zip(cases, rangee):
+                case.imshow(plt.imread(chemin_image))
+                case.set_title(Path(chemin_image).stem, fontsize=8)
 
-                if index_figure_courante < nombre_de_figures:
-                    chemin_image = chemins_valides[index_figure_courante]
-                    image_chargee = plt.imread(chemin_image)
-                    axe_courant.imshow(image_chargee)
-                    nom_court = Path(chemin_image).stem
-                    axe_courant.set_title(nom_court, fontsize=8)
+            # On masque toujours les axes (case vide ou pas) pour un rendu propre.
+            for case in cases:
+                case.axis("off")
 
-                # On masque toujours les axes (case vide ou pas) pour un rendu propre.
-                axe_courant.axis("off")
-
-                index_figure_courante = index_figure_courante + 1
-
+        # Bande réservée au titre : hauteur fixée en POUCES puis convertie, car `y` et
+        # `rect` sont en fraction de figure et la planche n'a pas de hauteur fixe. Avec
+        # les valeurs par défaut, le titre retomberait sur la première rangée dès que la
+        # planche s'allonge.
+        bande_titre_pouces = 0.6
         titre_planche = f"{nom_methode} — {self.subject} / {self.layer}"
-        figure_planche.suptitle(titre_planche, fontsize=16, fontweight="bold")
-        plt.tight_layout()
+        figure_planche.suptitle(
+            titre_planche, fontsize=16, fontweight="bold",
+            y=1 - 0.15 / hauteur_totale, va="top",
+        )
+        figure_planche.tight_layout(rect=(0, 0, 1, 1 - bande_titre_pouces / hauteur_totale))
 
         nom_fichier_planche = f"planche_{nom_methode}_{self.subject}_{self.layer}.png"
         chemin_sauvegarde = self._sauvegarder_figure(figure_planche, nom_fichier_planche, "Planche de figures sauvegardée")
@@ -757,7 +1028,9 @@ class VisualisationResultats:
 
         return chemin_sauvegarde
 
-    def generer_toutes_les_figures(self, nom_methode, resultats, grille_alphas, noms_parcelles=None, masque_roi=None):
+    def generer_toutes_les_figures(self, nom_methode, resultats, grille_alphas, noms_parcelles=None,
+                                   masque_roi=None, r2_par_scope=None, pearson_par_scope=None,
+                                   composition_scopes=None):
         """Génère et sauvegarde l'ensemble des figures standard pour UNE méthode de
         validation croisée (appelée une fois par méthode : full_manuel, ridgecv_loo,
         one_cycle...).
@@ -776,6 +1049,10 @@ class VisualisationResultats:
                 projettent les valeurs sur le cerveau entier (voxels hors ROI
                 masqués), et le ROImask histogram (déjà une ventilation par ROI) est
                 sauté puisque l'analyse est déjà restreinte à une ROI.
+            r2_par_scope, pearson_par_scope, composition_scopes : transmis tels quels à
+                `plot_comparaison_scopes`. Fournir `r2_par_scope` ajoute la comparaison
+                des zones cérébrales À LA PLANCHE, plutôt que dans un fichier à part :
+                une méthode = un seul PNG. None = pas de comparaison.
 
         Returns :
             dict : résumé ("r2_moyen", "r2_tous_les_tests", "alphas_moyens",
@@ -852,19 +1129,37 @@ class VisualisationResultats:
         chemin_figure = self.plot_r2_threshold(r2_tous_les_tests, suffix=suffix)
         liste_chemins_figures.append(chemin_figure)
 
+        # Figures larges, qui prennent une rangée entière de la planche au lieu d'une
+        # case : tassées dans un carré, leurs étiquettes deviendraient illisibles.
+        figures_pleine_largeur = []
+
         # ROIMask (uniquement en précision voxel, et uniquement pour l'analyse cerveau
         # entier : sur une analyse déjà restreinte à une ROI, la ventilation par ROI
         # n'apporte rien de plus)
         if self.flag_precision_voxel and masque_roi is None:
             print(" -> ROIMask...")
-            chemin_figure = self.plot_ROImask_histogram(r2_moyen)
+            chemin_figure = self.plot_ROImask_histogram(r2_moyen, pearson_finaux=resultats.pearson_moyen)
             liste_chemins_figures.append(chemin_figure)
+            figures_pleine_largeur.append(chemin_figure)
         elif masque_roi is None:
             print(f"  -> ROIMask ignoré pour {nom_methode} (nécessite flag_precision_voxel=True).")
 
+        # Comparaison des zones cérébrales : produite ici plutôt que dans un fichier à
+        # part, pour qu'une méthode ne laisse qu'un seul PNG derrière elle.
+        if r2_par_scope:
+            print(" -> Comparaison des scopes...")
+            chemin_figure = self.plot_comparaison_scopes(
+                nom_methode, r2_par_scope, pearson_par_scope,
+                composition_scopes=composition_scopes, suffix=suffix,
+            )
+            liste_chemins_figures.append(chemin_figure)
+            figures_pleine_largeur.append(chemin_figure)
+
         # Regroupement de toutes les figures ci-dessus dans un seul fichier PNG.
         print(" -> Assemblage de la planche de figures...")
-        chemin_planche = self.regrouper_figures_dans_une_planche(nom_methode, liste_chemins_figures)
+        chemin_planche = self.regrouper_figures_dans_une_planche(
+            nom_methode, liste_chemins_figures, figures_pleine_largeur=figures_pleine_largeur,
+        )
 
         # Une fois la planche assemblée, les figures individuelles ne servent plus :
         # on les supprime pour ne garder que le fichier fusionné.
