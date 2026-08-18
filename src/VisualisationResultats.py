@@ -86,7 +86,7 @@ class VisualisationResultats:
 
         Args :
             chemins : objet `CheminsProjet` déjà construit (cf.
-                `RidgeRegression.get_path_file_by_plateform`). Fournit les chemins de
+                `RidgeRegression.get_path_file`). Fournit les chemins de
                 l'atlas, de l'anatomie, du fichier ROImask et de la racine de sortie.
             subject : identifiant du sujet, ex. "sub-03" (titres et noms de fichiers).
             layer : nom de la couche TRIBE analysée (titres et noms de fichiers).

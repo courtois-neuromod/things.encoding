@@ -29,7 +29,6 @@ validation croisée** différents et compare ce qu'ils donnent (cf. [Validation 
 - [Validation croisée](#validation-croisée)
 - [Sorties et figures](#sorties-et-figures)
 - [Continuer le projet](#continuer-le-projet)
-- [Faire tourner la Ridge sur GPU](#faire-tourner-la-ridge-sur-gpu)
 - [Qualité et style du code](#qualité-et-style-du-code)
 
 ---
@@ -51,7 +50,7 @@ validation croisée** différents et compare ce qu'ils donnent (cf. [Validation 
  │    model.predict() → activations capturées au vol                     │
  │    HDF5Writer      → écriture incrémentale                            │
  │            ▼                                                          │
- │  output/features/things_encoding/sub-XX.h5   (~14 Go par sujet)       │
+ │  output/features/things/sub-XX.h5   (~14 Go par sujet)                │
  │     ses-XXX / run-N / preds                                           │
  │     ses-XXX / run-N / encoder_layerK_attn    (n_windows, T, 1152)     │
  │     ses-XXX / run-N / encoder_layerK_ffn     (n_windows, T, 1152)     │
@@ -59,7 +58,7 @@ validation croisée** différents et compare ce qu'ils donnent (cf. [Validation 
                              │
  ┌─ 3. ALIGNEMENT TEMPOREL ──────────────────────────────────────────────┐
  │  TribeHDF5Normalization  —  latents à 2 Hz  →  grille IRMf à 1/1.49 Hz│
- │  + BOLD CNeuroMod (data/timeseries/…)                                 │
+ │  + BOLD CNeuroMod (data/things.timeseries/…)                          │
  │            ▼                                                          │
  │  X (n_TR, 1152)   Y (n_TR, n_parcelles|n_voxels)   groupes (sessions) │
  └───────────────────────────────────────────────────────────────────────┘
@@ -96,8 +95,8 @@ Elles proviennent du dataset DataLad [`courtois-neuromod/things.timeseries`](htt
 
 | Précision | Fichier | Dimension de Y |
 |---|---|---|
-| **Parcelles** (défaut) | `data/timeseries/cneuromod2026/sub-XX/sub-XX_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5` | 1134 parcelles |
-| **Voxels** | `data/timeseries/voxel_native/sub-XX/sub-XX_task-things_space-T1w_desc-voxelwise_timeseries.h5` | ~10⁵ voxels |
+| **Parcelles** (défaut) | `data/things.timeseries/timeseries/cneuromod2026/sub-XX/sub-XX_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5` | 1134 parcelles |
+| **Voxels** | `data/things.timeseries/timeseries/voxel_native/sub-XX/sub-XX_task-things_space-T1w_desc-voxelwise_timeseries.h5` | ~10⁵ voxels |
 
 Chaque dossier contient aussi l'image d'atlas (`_dseg.nii.gz`) ou le masque de matière
 grise (`_label-GMfromFS_desc-indivFunc_mask.nii.gz`) nécessaires aux cartes cérébrales.
@@ -130,8 +129,7 @@ grise (`_label-GMfromFS_desc-indivFunc_mask.nii.gz`) nécessaires aux cartes cé
 - [**uv**](https://docs.astral.sh/uv/getting-started/installation/)
 - **ffmpeg** et **ffprobe** accessibles dans le `PATH` (conversion vidéo, lecture des durées)
 - Un compte HuggingFace avec accès au modèle *gated* [`facebook/tribev2`](https://huggingface.co/facebook/tribev2)
-- Un **GPU CUDA** pour l'extraction des latents. L'analyse Ridge tourne sur CPU par défaut,
-  et peut être basculée sur GPU — cf. [Faire tourner la Ridge sur GPU](#faire-tourner-la-ridge-sur-gpu)
+- Un **GPU CUDA** pour l'extraction des latents (l'analyse Ridge, elle, tourne sur CPU)
 
 ### Mise en place
 
@@ -168,7 +166,7 @@ cd src
 | Ordre | Commande | Effet |
 |---|---|---|
 | 1 | `uv run python VFRtoCFRConverter.py` | convertit `data/things_mp4_vfr/**` en framerate constant (64 fps, CRF 20) |
-| 2 | `uv run python main.py --subject sub-01` | extrait les latents TRIBE d'un sujet → `output/features/things_encoding/sub-01.h5` |
+| 2 | `uv run python main.py --subject sub-01` | extrait les latents TRIBE d'un sujet → `output/features/things/sub-01.h5` |
 | 3 | `uv run python RidgeRegression.py` | **analyse principale** : Ridge + validation croisée + figures |
 
 Points à connaître :
@@ -302,21 +300,17 @@ Coûteuse (triple boucle, aucun raccourci algébrique), c'est la référence de 
 ### 2. `nested_cross_validation_ridgecv_loo`
 
 Jumeau *sklearn-natif* de la précédente : même découpage externe, mais la boucle interne est
-remplacée par un `RidgeCV` (cf. `RidgeRegression._ajuster_ridgecv`) :
+remplacée par
 
 ```python
-scaler_Y = StandardScaler()
-modele = make_pipeline(
-    StandardScaler(),
-    RidgeCV(alphas=grille_alphas, alpha_per_target=True, cv=None, scoring="r2"),
+TransformedTargetRegressor(
+    regressor=make_pipeline(
+        StandardScaler(),
+        RidgeCV(alphas=grille_alphas, alpha_per_target=True, cv=None, scoring="r2"),
+    ),
+    transformer=StandardScaler(),
 )
-modele.fit(X_train, scaler_Y.fit_transform(Y_train))
-Y_pred = scaler_Y.inverse_transform(modele.predict(X_test))
 ```
-
-La standardisation de `Y` est explicite plutôt que déléguée à un
-`TransformedTargetRegressor` : ce dernier reconvertit `y` en numpy et perd le périphérique,
-ce qui rendait le calcul sur GPU impossible. Les opérations et les résultats sont identiques.
 
 `cv=None` déclenche le LOO analytique (validation croisée généralisée), incomparablement plus
 rapide. **Nuance importante** : ce LOO se fait *par point temporel*, là où la version manuelle
@@ -480,20 +474,42 @@ Tout se pilote depuis le bloc `if __name__ == "__main__":` de
 [`RidgeRegression.py`](src/RidgeRegression.py) :
 
 ```python
-plateforme            = "Rorqual"          # ou autre valeur → chemins locaux
+taches                = "things"           # ou "friends"
 liste_sujets          = ["sub-03"]
 LAYER                 = "encoder_layer7_ffn"
 flag_delai_bold_brute = True               # décalage −5 s ; False → convolution HRF
 centrage_donne_temps  = False
 flag_precision_voxel  = False              # False → 1134 parcelles ; True → voxels
-flag_gpu              = False              # True → régressions sur GPU, cf. plus bas
 alphas                = np.logspace(-1, 10, 20)
 ```
 
-`plateforme` ne change qu'une chose : les racines de chemins. Sur `"Rorqual"` elles sont
-codées en dur vers `/home/aclaud/links/scratch/…` et le dossier des latents s'appelle `hdf5` ;
-partout ailleurs, la racine est celle du dépôt et le dossier s'appelle `features`.
-**C'est le premier endroit à adapter pour installer le projet sur une autre machine.**
+### Où sont les fichiers : découverte, pas convention
+
+Il n'y a plus de paramètre `plateforme` ni de chemin codé en dur. Les fichiers sont
+**cherchés** par [`DecouverteChemins.py`](src/DecouverteChemins.py) sous des racines
+déclarées : une réorganisation interne d'un dataset (`data/timeseries/` renommé
+`data/things.timeseries/`, par exemple) n'oblige plus à éditer le code, et un fichier
+manquant est signalé **avant** tout calcul plutôt que par une `OSError` de h5py après
+plusieurs minutes de chargement.
+
+Deux variables d'environnement, toutes deux optionnelles, suffisent à changer de machine :
+
+| variable | défaut | à poser sur |
+|---|---|---|
+| `THINGS_ROOT_DONNEES` | `<dépôt>/data` | le cluster : `/home/aclaud/links/scratch` |
+| `THINGS_ROOT_STIMULI` | `<dépôt>/friends.stimuli` | Friends, si les vidéos sont ailleurs |
+
+Sous ces racines, tout est découvert : le dataset (`things.timeseries/`,
+`friends.timeseries/`), le dossier des latents (`features/things/` en local, `hdf5/` sur le
+cluster), les masques, les anatomies, les vidéos. La découverte coûte ~20 ms — elle est
+refaite à chaque exécution, il n'y a donc aucun cache à invalider.
+
+Trois cas sont distingués dans les messages d'erreur, parce que le remède diffère :
+
+- **absent** — la donnée n'existe pas ici ;
+- **contenu non récupéré** — pointeur datalad, le message donne la commande `datalad get` ;
+- **ambigu** — plusieurs fichiers de contenus différents ; l'arbitrage est un choix
+  scientifique, le code refuse de le faire à ta place.
 
 Viennent ensuite deux dictionnaires :
 
@@ -522,37 +538,6 @@ scope_detaille  = "toutes_parcelles"   # quel scope reçoit la planche complète
 Chaque méthode produit donc **une planche détaillée et une figure de comparaison**, quel que
 soit le nombre de scopes.
 
-### Faire tourner la Ridge sur GPU
-
-`flag_gpu = True` bascule les régressions sur GPU via le [support de l'API Array de
-scikit-learn](https://scikit-learn.org/stable/modules/array_api.html). **Les résultats sont
-les mêmes** — alphas identiques, R² et Pearson à la précision `float32` près ; seul le temps
-de calcul change.
-
-C'est pensé pour la **précision voxel**. En parcelles, `Y` pèse 0,2 Go et le calcul passe
-déjà bien sur CPU ; en voxels il pèse ~17 Go et chaque fold enchaîne une SVD sur
-`X (40 470, 1152)` puis un balayage de 20 alphas sur 104 007 cibles.
-
-Le flag est sans danger :
-
-- **aucun GPU disponible** → message explicite, l'analyse continue sur CPU ;
-- **mémoire GPU insuffisante** → l'empreinte estimée est affichée, puis repli sur CPU. Mieux
-  vaut ça qu'un `CUDA out of memory` au milieu d'un job de plusieurs heures ;
-- **sur MPS** (Apple Silicon) `aten::_linalg_eigh` n'est pas implémenté et retombe sur CPU :
-  le gain y est moindre que sur CUDA.
-
-Deux variables d'environnement sont nécessaires, et doivent être posées **avant** l'import de
-scipy et de torch. `RidgeRegression.py` les pose lui-même en tête de module, ce qui suffit
-quand il est le point d'entrée ; dans un script SLURM, mieux vaut les exporter explicitement :
-
-```bash
-export SCIPY_ARRAY_API=1              # sans elle, sklearn refuse d'activer l'API Array
-export PYTORCH_ENABLE_MPS_FALLBACK=1  # utile sur Mac uniquement, sans effet sur CUDA
-```
-
-Aucune dépendance supplémentaire : `torch` est déjà requis par l'extraction, et scikit-learn
-1.9 n'a pas besoin de `array-api-compat`.
-
 ### Qualité et style du code
 
 Le projet est formaté et vérifié par [ruff](https://docs.astral.sh/ruff/), piloté par
@@ -576,7 +561,7 @@ couper. Deux fichiers ignorent `E402`, avec la raison en commentaire dans `pypro
 | Objectif | Où intervenir |
 |---|---|
 | Tester une autre couche TRIBE | changer `LAYER` — toutes les couches sont déjà dans le HDF5, aucune ré-extraction nécessaire |
-| Passer en voxelwise | `flag_precision_voxel = True` (fichiers ~16 Go, prévoir la mémoire) ; envisager `flag_gpu = True` |
+| Passer en voxelwise | `flag_precision_voxel = True` (fichiers ~16 Go, prévoir la mémoire) |
 | Ajouter un schéma de validation croisée | nouvelle méthode `nested_cross_validation_*` renvoyant un `ResultatsCV` ; les champs optionnels laissés à `None` font simplement sauter les figures correspondantes |
 | Ajouter une figure | nouvelle méthode de `VisualisationResultats`, appelée depuis `generer_toutes_les_figures` et ajoutée à `liste_chemins_figures` pour entrer dans la planche |
 | Comparer d'autres zones cérébrales | ajouter une entrée à `scopes` — aucune CV supplémentaire, le scope est dérivé du passage existant tant qu'il est inclus dans `scope_cv` |

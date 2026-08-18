@@ -37,6 +37,7 @@ from litcoder_folding import create_chunked_folds_trimmed, create_kfold_trimmed
 CHEMIN_BOLD = (
     Path(__file__).resolve().parent.parent
     / "data"
+    / "things.timeseries"
     / "timeseries"
     / "cneuromod2026"
     / "sub-01"

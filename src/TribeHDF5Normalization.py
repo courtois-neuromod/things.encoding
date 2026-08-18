@@ -14,8 +14,6 @@ class TribeHDF5Normalization:
         chemin_tribe,
         chemin_cneuromod,
         chemin_video,
-        tribe_ses,
-        tribe_run,
         tribe_layer,
         cneuromod_ses,
         cneuromod_dataset,
@@ -23,17 +21,27 @@ class TribeHDF5Normalization:
         TR_irmf_s,
         flag_delai_bold_brute,
         centrage_donne_temps,
+        cles_tribe=None,
+        tribe_ses=None,
+        tribe_run=None,
     ):
         """
         Initialise le normalisateur avec les chemins, les clés HDF5 et les constantes de temps.
+
+        Les embeddings ne sont pas rangés à la même profondeur selon la tâche :
+        `ses-001/run-1/{couche}` pour Things (un fichier par sujet), `s01e02a/{couche}`
+        pour Friends (un fichier par épisode, partagé entre sujets). D'où `cles_tribe`,
+        un tuple de longueur variable, qui remplace le couple (tribe_ses, tribe_run) —
+        ces deux-là restent acceptés pour les appels existants.
         """
         self.chemin_tribe = chemin_tribe
         self.chemin_cneuromod = chemin_cneuromod
         self.chemin_video = chemin_video
 
         # Clés pour naviguer dans l'HDF5 de TRIBE
-        self.tribe_ses = tribe_ses
-        self.tribe_run = tribe_run
+        if cles_tribe is None:
+            cles_tribe = tuple(c for c in (tribe_ses, tribe_run) if c is not None)
+        self.cles_tribe = tuple(cles_tribe)
         self.tribe_layer = tribe_layer
 
         # Clés pour naviguer dans l'HDF5 de Cneuromod
@@ -92,10 +100,18 @@ class TribeHDF5Normalization:
             # print(f"Dataset Cneuromod (Y) : {self.Y_cible.shape}")
 
             # 2. Extraction et Aplatissement Tribe
-            dataset_tribe = tribe_hdf5[self.tribe_ses][self.tribe_run][self.tribe_layer]
+            noeud = tribe_hdf5
+            for cle in self.cles_tribe:
+                noeud = noeud[cle]
+            dataset_tribe = noeud[self.tribe_layer]
             # print(f"Dataset Tribe origin : {dataset_tribe.shape}")
 
-            dataset_tribe_concatene = dataset_tribe[:].reshape(-1, 1152)
+            # La dimension d'embedding est lue sur le dataset plutôt que codée en
+            # dur : seules les deux premières dimensions (fenêtres, instants) sont
+            # aplaties, quelle que soit la largeur du modèle.
+            dataset_tribe_concatene = dataset_tribe[:].reshape(
+                -1, dataset_tribe.shape[-1]
+            )
             # print(f"Dataset Tribe concatene : {dataset_tribe_concatene.shape}")
 
             # 3. Nettoyage Temporel (Coup de ciseaux)

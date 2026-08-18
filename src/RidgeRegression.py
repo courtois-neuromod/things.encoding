@@ -6,37 +6,23 @@ Entraîne une Ridge (grille d'alphas balayée manuellement) par couche et
 """
 
 import gc
-import os
 import warnings
-from contextlib import nullcontext
+from contextlib import ExitStack
 from dataclasses import dataclass
-from pathlib import Path
-
-# scipy n'active son support de l'API Array que si cette variable est lue AU MOMENT de
-# son import : la poser depuis `__main__` serait trop tard, et `config_context(
-# array_api_dispatch=True)` lèverait alors une RuntimeError. D'où sa place ici, AVANT
-# les imports tiers ci-dessous — l'ordre est significatif, ne pas le réorganiser.
-# (C'est aussi pourquoi ce fichier ignore E402, cf. `per-file-ignores` du pyproject.)
-os.environ.setdefault("SCIPY_ARRAY_API", "1")
-
-# Même contrainte pour torch : `aten::_linalg_eigh`, utilisé par le chemin GCV de
-# RidgeCV, n'est pas implémenté sur MPS et doit retomber sur CPU. La variable est lue
-# à l'initialisation du backend MPS — la poser après le premier appel à
-# `torch.backends.mps.is_available()` serait déjà trop tard. Sans effet sur CUDA.
-os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import h5py
 import numpy as np
 import pandas as pd
 from scipy.linalg import LinAlgWarning
 from scipy.stats import ConstantInputWarning, pearsonr
-from sklearn import config_context
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.metrics import r2_score
 from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from DecouverteChemins import DecouverteChemins, UniteAlignement
 from GroupShuffleSplitRun import GroupShuffleSplitRun
 from GroupShuffleSplitSession import GroupShuffleSplitSession
 from litcoder_folding import create_chunked_folds_trimmed
@@ -46,17 +32,11 @@ from VisualisationResultats import VisualisationResultats
 # Ignore spécifiquement les avertissements de matrices mal conditionnées
 warnings.filterwarnings(action="ignore", category=LinAlgWarning)
 
-# Idem pour les colonnes constantes rencontrées par `pearsonr` : un voxel plat, ou
-# une prédiction plate quand l'alpha retenu est proche de 1e10, donne un écart-type
-# nul donc une corrélation indéfinie. scipy renvoie alors NaN (ramené à 0 juste après
-# le calcul), ce qui est le comportement voulu — l'avertissement n'apporte rien.
+# Idem pour les colonnes constantes rencontrées par `pearsonr`
 warnings.filterwarnings(action="ignore", category=ConstantInputWarning)
 
 # Idem pour les débordements numpy (divide/overflow/invalid) rencontrés lors des
-# fits Ridge avec les plus grands alphas de la grille (jusqu'à 1e10) : ils produisent
-# potentiellement des coefficients NaN/Inf pour ces alphas précis, mais n'empêchent
-# pas la sélection de l'alpha optimal (leur R² correspondant devient alors très
-# négatif ou NaN, donc jamais retenu par argmax).
+# fits Ridge avec les plus grands alphas de la grille (jusqu'à 1e10)
 np.seterr(divide="ignore", over="ignore", invalid="ignore")
 
 T_TRIBE_S = 0.5
@@ -67,8 +47,7 @@ NB_SESSIONS_TOTAL = 36
 SESSIONS_TEST_ONE_CYCLE = (14, 15, 16)
 BUFFER_TEST_ONE_CYCLE = (13, 17)
 
-# Blocs de Validation et leurs buffers, donnés explicitement par le protocole
-# (bornes et ordre exacts — pas dérivés d'une règle de tuilage générique).
+# Blocs de Validation et leurs buffers
 FOLDS_VALIDATION_ONE_CYCLE = (
     {"validation": (1, 2, 3), "buffer": (4,)},
     {"validation": (5, 6, 7), "buffer": (4, 8)},
@@ -107,119 +86,40 @@ ROIS_CATEGORIELLES = (
 )
 
 # Réseaux Yeo-7 (noms exacts tels qu'ils apparaissent dans la colonne "name" du
-# fichier d'annotations de l'atlas cneuromod26, ex. "7Networks_LH_Vis_1") utilisés
-# pour restreindre l'analyse en précision parcelle.
+# fichier d'annotations de l'atlas cneuromod26
 RESEAUX_PARCELLES_VISUEL = ("Vis",)
 RESEAUX_PARCELLES_VISUEL_DORSATTN = ("Vis", "DorsAttn")
 
 NOM_FICHIER_ANNOTATIONS_PARCELLES = "tpl-MNI152NLin2009cAsym_atlas-Schaefer2018TianS3NettekovenAsym_desc-1000Parcels7Networks50Subcort128Cereb_parcelAnnotations.tsv"
 
-# Marge gardée libre sur le GPU au-delà de X et Y : la SVD, les coefficients et les
-# prédictions intermédiaires vivent aussi sur le périphérique. Mesuré grossièrement,
-# volontairement large — le coût d'une sous-estimation est un CUDA out of memory au
-# milieu d'un job de plusieurs heures.
-FACTEUR_MARGE_MEMOIRE_GPU = 2.5
+TACHES_CONNUES = ("things", "friends")
 
+# Dossiers écartés du parcours de découverte : ils ne contiennent jamais de
+# données du projet, mais représentent l'écrasante majorité des fichiers (58 000
+# sans élagage contre 7 400 avec, soit 0,5 s contre 0,01 s de parcours).
+DOSSIERS_IGNORES = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+        ".datalad",
+        ".ruff_cache",
+        ".pytest_cache",
+        "site-packages",
+        ".mypy_cache",
+    }
+)
 
-def _resoudre_peripherique(flag_gpu):
-    """Choisit le périphérique de calcul, ou None pour rester en numpy sur CPU.
-
-    Args :
-        flag_gpu : True pour tenter le GPU.
-
-    Returns :
-        str | None : "cuda", "mps", ou None (= numpy/CPU).
-
-    Notes :
-        Aucun GPU disponible n'est PAS une erreur : on le signale et on continue sur
-        CPU. Un plantage ferait perdre une soumission de job pour un motif qui n'empêche
-        pas l'analyse de tourner, seulement d'aller vite.
-    """
-    if not flag_gpu:
-        return None
-
-    import torch
-
-    if torch.cuda.is_available():
-        print(f"[GPU] CUDA détecté : {torch.cuda.get_device_name(0)}")
-        return "cuda"
-
-    if torch.backends.mps.is_available():
-        # Le repli CPU de `aten::_linalg_eigh` est déjà armé en tête de module : il doit
-        # l'être avant l'initialisation du backend, donc bien avant d'arriver ici.
-        print(
-            "[GPU] MPS détecté (Apple Silicon). RidgeCV y retombe sur CPU pour la "
-            "décomposition propre — le gain est moindre que sur CUDA."
-        )
-        return "mps"
-
-    print(
-        "[GPU] flag_gpu=True mais aucun périphérique disponible (ni CUDA ni MPS) : "
-        "l'analyse continue sur CPU, en numpy."
-    )
-    return None
-
-
-def _vers_numpy(tableau):
-    """Ramène un tableau sur CPU en numpy, qu'il vienne du GPU ou déjà de numpy.
-
-    Appelée au POINT DE PRODUCTION des sorties de modèle (`r2_score`, `predict`,
-    `.alpha_`), pour que toute l'arithmétique numpy en aval reste inchangée.
-    """
-    return tableau.cpu().numpy() if hasattr(tableau, "cpu") else tableau
-
-
-def _concatener(tableaux, axis=0):
-    """Concatène des tableaux numpy OU des tenseurs torch, selon ce qu'on lui donne.
-
-    `np.concatenate` lève sur des tenseurs GPU ; cette fonction aiguille vers
-    `torch.cat`, qui a la même sémantique mais nomme son axe `dim`.
-    """
-    if hasattr(tableaux[0], "cpu"):
-        import torch
-
-        return torch.cat(tableaux, dim=axis)
-    return np.concatenate(tableaux, axis=axis)
-
-
-def _pearson_par_colonne(Y_vrai, Y_pred):
-    """Corrélation de Pearson colonne par colonne, en numpy ou sur le périphérique.
-
-    Les colonnes de variance nulle (voxel plat, ou prédiction plate quand l'alpha
-    retenu est proche de 1e10) donnent une corrélation indéfinie, ramenée à 0 : un
-    "aucune corrélation détectable" qui ne contamine pas les agrégations.
-
-    Returns :
-        Tableau (n_features,) du même type que les entrées. La version torch concorde
-        avec `scipy.stats.pearsonr(axis=0)` à 1,3e-06 près.
-    """
-    if not hasattr(Y_vrai, "cpu"):
-        return np.nan_to_num(pearsonr(Y_vrai, Y_pred, axis=0).statistic, nan=0.0)
-
-    import torch
-
-    a = Y_vrai - Y_vrai.mean(0, keepdim=True)
-    b = Y_pred - Y_pred.mean(0, keepdim=True)
-    norme_a = a.pow(2).sum(0).sqrt()
-    norme_b = b.pow(2).sum(0).sqrt()
-    valide = (norme_a > 0) & (norme_b > 0)
-    return torch.where(
-        valide, (a * b).sum(0) / (norme_a * norme_b), torch.zeros_like(norme_a)
-    )
-
-
-@dataclass
-class CheminsProjet:
-    """Regroupe tous les chemins de fichiers nécessaires pour un sujet donné."""
-
-    root_encoding: Path
-    root_timeseries: Path
-    chemin_tribe: Path
-    chemin_cneuromod: Path
-    chemin_atlas: Path
-    chemin_ROImask: Path
-    chemin_anatomie: Path = None
-    chemin_annotations_parcelles: Path = None
+# Runs écartés à la main, par (tâche, sujet, session CNeuroMod, run) : mauvais
+# alignement spatial après prétraitement. Un seul run est en cause, pas la
+# session entière.
+RUNS_EXCLUS_MANUELLEMENT = frozenset(
+    {
+        ("things", "sub-06", "ses-08", "run-6"),
+    }
+)
 
 
 @dataclass
@@ -227,12 +127,7 @@ class ResultatsCV:
     """Sortie commune des quatre méthodes `nested_cross_validation_*`.
 
     Les champs obligatoires sont produits par toutes les méthodes ; les champs
-    optionnels ne le sont que par certaines, et valent None ailleurs. C'est ce qui
-    remplace l'ancien dispatch par longueur de tuple côté figures : on teste
-    `resultats.best_alphas_inner is not None`, pas `len(resultats) == 7`.
-
-    `VisualisationResultats` lit ces champs par attribut sans importer ce module :
-    la dépendance reste à sens unique (RidgeRegression -> VisualisationResultats).
+    optionnels ne le sont que par certaines, et valent None ailleurs.
 
     Attributs :
         r2_moyen : R² moyen par voxel/parcelle, shape (n_features,).
@@ -275,14 +170,6 @@ class ResultatsCV:
     def restreindre(self, masque):
         """Renvoie les mêmes résultats limités à un sous-ensemble de voxels/parcelles.
 
-        Chaque voxel est régressé INDÉPENDAMMENT des autres : `StandardScaler`
-        normalise colonne par colonne, `alpha_per_target=True` choisit un alpha par
-        cible, `r2_score(multioutput='raw_values')` score par colonne, et le découpage
-        train/test ne dépend que des sessions/runs, pas du masque. Sélectionner des
-        colonnes après coup donne donc exactement ce qu'aurait donné une CV relancée
-        sur ce seul sous-ensemble — vérifié à ~1e-16 près sur les deux chemins de
-        modèle du projet, cf. `test/test_equivalence_scopes.py`.
-
         C'est ce qui permet de ne lancer la CV qu'une fois pour tous les scopes,
         au lieu d'une fois par scope (et donc de ne charger les données qu'une fois).
 
@@ -309,47 +196,41 @@ class ResultatsCV:
 
 
 def scope_disponible(masque_scope, masque_cv):
-    """Dit si un scope peut être dérivé des résultats d'une CV, sans la relancer.
-
-    Séparé de `masque_relatif` à dessein : ce dernier renvoie None pour signifier
-    « aucune restriction à appliquer », ce qui ne doit surtout pas se confondre avec
-    « scope indisponible ». Deux questions distinctes, deux fonctions.
+    """Dis si en restreignant le scope on peut calculé les résultat de la CV sur la partie du cerveau demandé.
 
     Args :
         masque_scope : booléen sur l'espace complet, ou None (= tout le cerveau).
-        masque_cv : booléen sur l'espace complet ayant servi à la CV, ou None.
+        masque_cv : booléen sur l'espace complet ayant servi à la CV, ou None
+            (= la CV a tourné sur tout le cerveau).
 
     Returns :
-        bool : True si le scope est inclus dans ce que la CV a réellement couvert.
-            Un scope indisponible n'est pas une erreur, juste une case en moins dans
-            la figure de comparaison.
+        bool : True si le scope se déduit des résultats existants. False n'est pas une
+            erreur, juste une case en moins dans la figure de comparaison : l'appelant
+            saute ce scope avec un message.
     """
     if masque_cv is None:
         return True  # la CV couvre tout : n'importe quel scope en dérive
     if masque_scope is None:
-        # "Tout le cerveau" ne se dérive pas d'une CV restreinte : l'afficher
-        # reviendrait à étiqueter le sous-espace de la CV comme s'il était complet.
+        # Cas inverse : on demande tout le cerveau à une CV qui n'en a fait qu'un
+        # morceau. Refusé — la figure étiquetterait ce morceau « cerveau entier ».
         return False
+    # `masque_cv[masque_scope]` lit la couverture de la CV aux seules positions du
+    # scope : un seul False = une colonne demandée que la CV n'a jamais calculée.
     return bool(np.all(masque_cv[masque_scope]))
 
 
 def masque_relatif(masque_scope, masque_cv):
-    """Exprime un masque de scope dans l'espace des résultats d'une CV restreinte.
-
-    Les masques de scope (`_charger_masque_roi`, `_charger_masque_parcelles`) sont
-    définis sur l'espace COMPLET du cerveau, alors que `ResultatsCV.restreindre`
-    attend un masque exprimé dans l'espace des résultats. Quand la CV a tourné sur
-    tout le cerveau (le cas courant), les deux coïncident ; sinon il faut reprojeter.
-
-    À n'appeler que sur un scope validé par `scope_disponible`.
+    """Traduit un masque de scope de l'espace complet vers l'espace des résultats.
 
     Args :
         masque_scope : booléen sur l'espace complet, ou None (= tout le cerveau).
-        masque_cv : booléen sur l'espace complet ayant servi à la CV, ou None.
+        masque_cv : booléen sur l'espace complet ayant servi à la CV, ou None
+            (= la CV a tourné sur tout le cerveau, les deux espaces coïncident).
 
     Returns :
-        np.ndarray | None : masque à passer à `ResultatsCV.restreindre`. None
-            signifie « aucune restriction », jamais « indisponible ».
+        np.ndarray | None : masque à passer à `ResultatsCV.restreindre`. None veut dire
+            « aucune restriction à appliquer », jamais « indisponible » — c'est
+            précisément pour ça que la disponibilité se teste avec `scope_disponible`.
     """
     if masque_cv is None:
         return masque_scope
@@ -362,154 +243,98 @@ class RidgeRegression:
 
     def __init__(
         self,
-        plateforme,
         subject,
         layer,
         flag_delai_bold_brute,
         centrage_donne_temps,
         flag_precision_voxel,
         ROImask_flag,
+        taches="things",
         randomize_flag=False,
-        flag_gpu=False,
+        racines_recherche=None,
     ):
         """Initialise la configuration d'un sujet (chemins, options de prétraitement).
 
         Args :
-            plateforme : "Rorqual" (cluster) ou toute autre valeur (poste local/Mac).
             subject : identifiant du sujet, ex. "sub-03".
             layer : nom de la couche TRIBE dont on utilise les activations.
             flag_delai_bold_brute : voir `TribeHDF5Normalization`.
             centrage_donne_temps : voir `TribeHDF5Normalization`.
             flag_precision_voxel : True = timeseries voxelwise, False = parcelles.
             ROImask_flag : Afficher plot ROImask.
+            taches : "things" ou "friends".
             randomize_flag : si True, permute aléatoirement l'ordre des runs de Y
                 (baseline de randomisation).
-            flag_gpu : si True, exécute les régressions sur GPU via le support de l'API
-                Array de scikit-learn. Pensé pour la précision voxel, où Y pèse ~17 Go
-                contre 0,2 Go en parcelles. Sans périphérique disponible, ou si la
-                mémoire GPU ne suffit pas, l'analyse retombe sur CPU en le signalant.
-
-        Notes :
-            Le GPU ne change AUCUN résultat attendu : les alphas retenus sont
-            identiques (grille discrète), les R² concordent à la précision float32
-            près. Il ne change que le temps de calcul.
+            racines_recherche : racines à parcourir pour découvrir les fichiers.
+                Par défaut la racine du dépôt puis son parent, ce qui couvre aussi
+                bien les données rangées dans le dépôt que les datasets déposés à
+                côté. À renseigner uniquement si les données sont ailleurs.
         """
-        self.plateforme = plateforme
+        if taches not in TACHES_CONNUES:
+            raise ValueError(f"taches inconnue : {taches!r} (attendu {TACHES_CONNUES})")
+
         self.subject = subject
         self.layer = layer
         self.flag_delai_bold_brute = flag_delai_bold_brute
         self.centrage_donne_temps = centrage_donne_temps
         self.flag_precision_voxel = flag_precision_voxel
         self.randomize_flag = randomize_flag
-        self.flag_gpu = flag_gpu
-        self.peripherique = _resoudre_peripherique(flag_gpu)
         self.ROImask_flag = ROImask_flag
+        self.taches = taches
+        self.racines_recherche = racines_recherche
+        self._chemins = None
+        self._index = None
 
-    def get_path_file_by_plateform(self, plateforme):
-        """Construit les chemins de fichiers du sujet selon la plateforme
-        (cluster Rorqual ou poste local) et le niveau de précision (voxel/parcelle).
+        decouvreur = DecouverteChemins(
+            subject=self.subject,
+            taches=self.taches,
+            flag_precision_voxel=self.flag_precision_voxel,
+            racines_recherche=self.racines_recherche,
+        )
+
+        self.chemins = decouvreur.chemins
+
+    def discover_runs(self, chemins=None, tribe_hdf5=None, cneuromod_hdf5=None):
+        """Apparie embeddings et signal IRMf, et renvoie la liste des unités alignables.
+
+        Aiguillage par tâche : les deux jeux ne se joignent pas sur la même clé.
+        Things apparie sur (session, run), calculables des deux côtés ; Friends
+        apparie sur le nom d'épisode, la seule clé commune.
 
         Args :
-            plateforme : "Rorqual" (cluster) ou toute autre valeur (poste local/Mac).
+            chemins : `CheminsProjet` déjà résolus. Par défaut `self.chemins`.
+            tribe_hdf5 : fichier d'embeddings déjà ouvert (Things uniquement, où il
+                est unique). Si None, ouvert et fermé ici.
+            cneuromod_hdf5 : fichier IRMf déjà ouvert (Friends uniquement, où c'est
+                lui qu'on parcourt). Si None, ouvert et fermé ici.
 
         Returns :
-            CheminsProjet : tous les chemins nécessaires pour ce sujet.
+            list[UniteAlignement] : une entrée par run/épisode exploitable.
         """
-        if plateforme == "Rorqual":
-            ROOT_ENCODING = Path("/home/aclaud/links/scratch/things.encoding")
-            ROOT_TIMESERIES = Path("/home/aclaud/links/scratch/things.timeseries")
-            # Le dossier des sorties TRIBE ne porte pas le même nom des deux côtés :
-            # "hdf5" sur le cluster, "features" en local. Seul écart de chemin entre
-            # les deux plateformes, tout le reste se déduit des racines ci-dessus.
-            dossier_features = "hdf5"
+        chemins = self.chemins if chemins is None else chemins
+
+        if chemins.taches == "things":
+            unites = self._discover_runs_things(chemins, tribe_hdf5)
         else:
-            ROOT_ENCODING = Path(__file__).parent.parent
-            ROOT_TIMESERIES = ROOT_ENCODING / "data"
-            dossier_features = "features"
+            unites = self._discover_runs_friends(chemins, cneuromod_hdf5)
 
-        chemin_tribe = (
-            ROOT_ENCODING
-            / "output"
-            / dossier_features
-            / "things_encoding"
-            / f"{self.subject}.h5"
-        )
-        chemin_ROImask = (
-            ROOT_ENCODING
-            / "data"
-            / "brain_map_subj"
-            / f"{self.subject}_space-T1w_desc-ROImasks_voxelAnnotations.h5"
-        )
+        print(f"{len(unites)} unités trouvées pour {self.subject} ({chemins.taches})")
+        return unites
 
-        chemin_annotations_parcelles = (
-            ROOT_ENCODING
-            / "data"
-            / "brain_map_subj"
-            / NOM_FICHIER_ANNOTATIONS_PARCELLES
-        )
-
-        if self.flag_precision_voxel:
-            sous_dossier = (
-                ROOT_TIMESERIES / "timeseries" / "voxel_native" / self.subject
-            )
-            chemin_cneuromod = (
-                sous_dossier
-                / f"{self.subject}_task-things_space-T1w_desc-voxelwise_timeseries.h5"
-            )
-            chemin_atlas = (
-                sous_dossier
-                / f"{self.subject}_task-things_space-T1w_label-GMfromFS_desc-indivFunc_mask.nii.gz"
-            )
-            chemin_anatomie = sous_dossier / f"{self.subject}_desc-preproc_T1w.nii.gz"
-        else:
-            sous_dossier = (
-                ROOT_TIMESERIES / "timeseries" / "cneuromod2026" / self.subject
-            )
-            chemin_cneuromod = (
-                sous_dossier
-                / f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
-            )
-            chemin_atlas = (
-                sous_dossier
-                / f"{self.subject}_task-things_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_dseg.nii.gz"
-            )
-            chemin_anatomie = None
-
-        return CheminsProjet(
-            ROOT_ENCODING,
-            ROOT_TIMESERIES,
-            chemin_tribe,
-            chemin_cneuromod,
-            chemin_atlas,
-            chemin_ROImask,
-            chemin_anatomie,
-            chemin_annotations_parcelles,
-        )
-
-    def discover_runs(self, tribe_hdf5=None):
-        """Liste les runs disponibles dans le fichier HDF5 TRIBE et fait correspondre
-        chacun à sa session/run CNeuroMod et à sa vidéo source.
-
-        Args :
-            tribe_hdf5 : fichier HDF5 TRIBE déjà ouvert (évite de le rouvrir si
-                l'appelant en a déjà un). Si None, ouvert et fermé ici.
-
-        Returns :
-            list[tuple] : un tuple (tribe_ses, tribe_run, chemin_video, cneuromod_ses,
-                cneuromod_dataset) par run trouvé.
-        """
-        chemins = self.get_path_file_by_plateform(self.plateforme)
-
+    def _discover_runs_things(self, chemins, tribe_hdf5=None):
+        """Things : on parcourt le fichier d'embeddings du sujet (`ses-XXX/run-Y`) et
+        on en déduit les clés CNeuroMod, qui suivent la même numérotation à deux
+        chiffres près."""
         if not chemins.chemin_tribe.exists():
-            print(f"Erreur : Fichier introuvable : {chemins.chemin_tribe}")
+            raise FileNotFoundError(
+                f"Embeddings introuvables pour {self.subject} : {chemins.chemin_tribe}"
+            )
 
-        runs = []
-        gere_localement = tribe_hdf5 is None
+        unites = []
+        with ExitStack() as pile:
+            if tribe_hdf5 is None:
+                tribe_hdf5 = pile.enter_context(h5py.File(chemins.chemin_tribe, "r"))
 
-        if gere_localement:
-            tribe_hdf5 = h5py.File(chemins.chemin_tribe, "r")
-
-        try:
             for tribe_ses in sorted(tribe_hdf5.keys()):  # "ses-001", "ses-002", ...
                 for tribe_run in sorted(
                     tribe_hdf5[tribe_ses].keys()
@@ -524,47 +349,127 @@ class RidgeRegression:
                         f"{cneuromod_ses}_task-things_run-{num_run}_timeseries"
                     )
 
-                    # Chemin vidéo originale (non CFR) pour ffprobe
+                    # Vidéo originale (non CFR) pour ffprobe, retrouvée par son
+                    # nom dans l'index : son emplacement exact varie d'une
+                    # installation à l'autre, pas son nom.
                     nom_video = (
                         f"{self.subject}_{tribe_ses}_task-thingsmemory_{tribe_run}.mp4"
                     )
-                    if self.plateforme == "Rorqual":
-                        chemin_video = (
-                            chemins.root_encoding
-                            / "data"
-                            / "data"
-                            / self.subject
-                            / tribe_ses
-                            / nom_video
-                        )
-                    else:
-                        chemin_video = (
-                            chemins.root_encoding
-                            / "data"
-                            / "things_mp4_vfr"
-                            / self.subject
-                            / tribe_ses
-                            / nom_video
-                        )
 
-                    runs.append(
-                        (
-                            tribe_ses,
-                            tribe_run,
-                            chemin_video,
-                            cneuromod_ses,
-                            cneuromod_dataset,
+                    unites.append(
+                        UniteAlignement(
+                            chemin_tribe=chemins.chemin_tribe,
+                            cles_tribe=(tribe_ses, tribe_run),
+                            cneuromod_ses=cneuromod_ses,
+                            cneuromod_dataset=cneuromod_dataset,
+                            chemin_video=chemins.videos_par_nom.get(nom_video),
+                            num_session=num_ses,
+                            identifiant=f"{tribe_ses}/{tribe_run}",
                         )
                     )
-        finally:
-            if gere_localement:
-                tribe_hdf5.close()
+        return unites
 
-        print(f"{len(runs)} runs trouvés dans {chemins.chemin_tribe.name}")
-        return runs
+    def _discover_runs_friends(self, chemins, cneuromod_hdf5=None):
+        """Friends : on parcourt le fichier IRMf.
+
+        C'est l'inversion par rapport à Things, et elle est imposée par les données :
+        le numéro de session de scan n'existe que côté IRMf (il ne suit pas l'ordre
+        des épisodes, et diffère d'un sujet à l'autre), tandis que les embeddings
+        sont un fichier plat par épisode, partagé entre sujets. Le nom d'épisode est
+        donc la seule clé de jointure, et l'IRMf le seul côté qui la relie à une
+        session.
+
+        Les épisodes vus par l'IRMf sans embeddings correspondant sont annoncés puis
+        sautés (tous les épisodes n'ont pas encore été passés dans TRIBE).
+        """
+        unites = []
+        episodes_sans_embeddings = []
+
+        with ExitStack() as pile:
+            if cneuromod_hdf5 is None:
+                cneuromod_hdf5 = pile.enter_context(
+                    h5py.File(chemins.chemin_cneuromod, "r")
+                )
+
+            for cneuromod_ses in sorted(cneuromod_hdf5.keys()):  # "ses-001", ...
+                num_ses = int(cneuromod_ses.replace("ses-", ""))
+
+                for cneuromod_dataset in sorted(cneuromod_hdf5[cneuromod_ses].keys()):
+                    # "ses-001_task-s01e02a_timeseries" -> "s01e02a"
+                    episode = cneuromod_dataset.split("task-", 1)[1].rsplit(
+                        "_timeseries", 1
+                    )[0]
+
+                    chemin_tribe = chemins.dossier_embeddings / f"friends_{episode}.h5"
+                    if not chemin_tribe.exists():
+                        episodes_sans_embeddings.append(episode)
+                        continue
+
+                    unites.append(
+                        UniteAlignement(
+                            chemin_tribe=chemin_tribe,
+                            cles_tribe=(episode,),
+                            cneuromod_ses=cneuromod_ses,
+                            cneuromod_dataset=cneuromod_dataset,
+                            chemin_video=chemins.videos_par_nom.get(
+                                f"{chemins.taches}_{episode}.mkv"
+                            ),
+                            num_session=num_ses,
+                            identifiant=episode,
+                        )
+                    )
+
+        if episodes_sans_embeddings:
+            print(
+                f"{len(episodes_sans_embeddings)} épisodes IRMf sans embeddings, ignorés "
+                f"(ex. {sorted(episodes_sans_embeddings)[:5]})"
+            )
+        return unites
+
+    def _avertir_qualite_features(self, chemins):
+        """Signale les limites connues des embeddings de la tâche courante.
+
+        Ne bloque pas : la base de temps est établie. La lecture des sources de
+        TRIBE (`tribev2/grids/defaults.py`, `tribev2/main.py`) donne des fenêtres
+        de 100 s sans recouvrement (`duration_trs=100`, `overlap_trs_train=0`) sur
+        une grille interne à 2 Hz (`frequency=2`), d'où les 200 lignes par fenêtre,
+        et un timeline ancré à 0. Donc :
+
+            t(ligne r) = 0,5 x r    exactement, pour les deux tâches
+
+        `T_TRIBE_S = 0.5` est donc correct pour Friends aussi, et les lignes
+        surnuméraires ne sont pas un étirement mais une queue fabriquée (voir plus
+        bas), que le trim `int(durée / T_TRIBE_S)` d'`executer_pipeline` retire
+        précisément. Contrôle : s01e09a et s01e09b, 4200 et 4000 lignes, donnent
+        tous deux 1392 lignes gardées pour une vidéo de 696,2 s.
+
+        Ce qui reste imparfait, et qu'on assume faute de ré-extraction : dans le
+        pipeline d'extraction, `get_audio_and_text_events` découpe l'audio AVANT de
+        transcrire, si bien que chacun des ~12 chunks reçoit une copie du transcript
+        entier décalée de 120 x k secondes. D'où la queue fabriquée, et surtout,
+        dans les ~700 s réellement utilisées, jusqu'à 6 transcriptions superposées.
+
+        Conséquence à garder en tête en lisant les cartes : le flux vidéo/audio est
+        propre, le flux langage est brouillé, et la contamination croît au fil de
+        l'épisode. Les scopes visuels restent interprétables ; ce qui dépend du
+        langage est un plancher. Le correctif est d'appeler
+        `ExtractWordsFromAudio()` avant les `ChunkEvents` dans
+        `main_embeddings_friends.py`, comme le fait la config d'entraînement de
+        TRIBE, puis de ré-extraire.
+        """
+        if chemins.taches != "friends":
+            return
+        print(
+            "  ATTENTION — Embeddings Friends : l'alignement temporel est correct "
+            f"(t = {T_TRIBE_S} s x indice, vérifié sur les sources de TRIBE), mais le "
+            "flux LANGAGE est contaminé — le transcript est dupliqué jusqu'à 6 fois "
+            "dans la fenêtre utilisée, à cause de l'ordre des transformations dans "
+            "main_embeddings_friends.py. Le flux vidéo/audio est propre. "
+            "Interpréter les scopes visuels normalement, le reste comme un plancher."
+        )
 
     def create_X_Y_total(self):
-        """Construit les matrices X (activations) et Y (signal IRMf) en alignant
+        """Construit les matrices X (activations/embeddings) et Y (signal IRMf) en alignant
         temporellement chaque run, puis les concatène sur l'ensemble des runs.
 
         Returns :
@@ -573,7 +478,8 @@ class RidgeRegression:
                 - X, Y (np.ndarray) : activations et signal IRMf concaténés.
                 - groupes (np.ndarray) : numéro de session pour chaque échantillon.
         """
-        chemins = self.get_path_file_by_plateform(self.plateforme)
+        chemins = self.chemins
+        self._avertir_qualite_features(chemins)
 
         X_list, Y_list = [], []
         runs_ok = []
@@ -581,75 +487,113 @@ class RidgeRegression:
         runs_list = []
 
         print(f"Traitement des runs pour {self.subject} (TRIBE layer={self.layer})...")
-        with (
-            h5py.File(chemins.chemin_tribe, "r") as tribe_hdf5,
-            h5py.File(chemins.chemin_cneuromod, "r") as cneuromod_hdf5,
-        ):
-            runs = self.discover_runs(tribe_hdf5=tribe_hdf5)
 
-            for (
-                tribe_ses,
-                tribe_run,
-                chemin_video,
-                cneuromod_ses,
-                cneuromod_dataset,
-            ) in runs:
-                # Vérifier que la vidéo source existe localement
-                # Un seul run est en cause, pas la session entière : la règle visait au
-                # départ toute la ses-08 de sub-06, avant qu'on identifie que seul son
-                # run 6 est mal aligné. Les runs sont nommés "run-1".."run-6" (sans zéro
-                # de remplissage), d'où la comparaison à "run-6".
+        # Un `with` par fichier ne suffit pas : Things réutilise un fichier
+        # d'embeddings unique sur ~200 runs, Friends en ouvre un par épisode. Un
+        # cache d'UN SEUL handle couvre exactement les deux cas — Things retombe
+        # toujours sur le même chemin donc n'évince jamais, Friends évince à chaque
+        # épisode. Garder les 182 handles ouverts serait du gaspillage, et
+        # flirterait avec la limite de descripteurs du système.
+        with ExitStack() as pile:
+            cneuromod_hdf5 = pile.enter_context(
+                h5py.File(chemins.chemin_cneuromod, "r")
+            )
+            handle_tribe = {"chemin": None, "fichier": None}
+
+            def ouvrir_tribe(chemin):
+                if handle_tribe["chemin"] == chemin:
+                    return handle_tribe["fichier"]
+                if not chemin.exists():
+                    raise FileNotFoundError(
+                        f"Embeddings introuvables pour {self.subject} "
+                        f"({chemins.taches}) : {chemin}"
+                    )
+                if handle_tribe["fichier"] is not None:
+                    handle_tribe["fichier"].close()
+                handle_tribe.update(chemin=chemin, fichier=h5py.File(chemin, "r"))
+                # Filet de sécurité : fermeture garantie même si la boucle lève.
+                pile.callback(handle_tribe["fichier"].close)
+                return handle_tribe["fichier"]
+
+            unites = self.discover_runs(
+                chemins=chemins,
+                tribe_hdf5=(
+                    ouvrir_tribe(chemins.chemin_tribe)
+                    if chemins.taches == "things"
+                    else None
+                ),
+                cneuromod_hdf5=cneuromod_hdf5,
+            )
+
+            for unite in unites:
                 if (
-                    self.subject == "sub-06"
-                    and cneuromod_ses == "ses-08"
-                    and tribe_run == "run-6"
-                ):
+                    chemins.taches,
+                    self.subject,
+                    unite.cneuromod_ses,
+                    unite.cles_tribe[-1],
+                ) in RUNS_EXCLUS_MANUELLEMENT:
                     print(
-                        f"{cneuromod_ses}/{tribe_run} ignoré pour {self.subject} "
+                        f"{unite.identifiant} ignoré pour {self.subject} "
                         "(décision manuelle : mauvais alignement spatial après prétraitement)."
                     )
                     continue
 
-                if not chemin_video.exists():
-                    print(f"Vidéo manquante, run ignoré : {chemin_video.name}")
+                # La durée réelle du stimulus sert à retirer le padding des
+                # embeddings TRIBE : sans elle, le run n'est pas alignable.
+                if unite.chemin_video is None:
+                    print(f"Vidéo introuvable, run ignoré : {unite.identifiant}")
                     continue
 
                 if (
-                    cneuromod_ses not in cneuromod_hdf5
-                    or cneuromod_dataset not in cneuromod_hdf5[cneuromod_ses]
+                    unite.cneuromod_ses not in cneuromod_hdf5
+                    or unite.cneuromod_dataset
+                    not in cneuromod_hdf5[unite.cneuromod_ses]
                 ):
                     print(
-                        f"CNeuroMod : Données IRMf absentes pour {cneuromod_ses} / {cneuromod_dataset}. Run ignoré."
+                        f"CNeuroMod : Données IRMf absentes pour {unite.cneuromod_ses} / "
+                        f"{unite.cneuromod_dataset}. Run ignoré."
                     )
                     continue
 
                 normalisateur = TribeHDF5Normalization(
-                    chemin_tribe=chemins.chemin_tribe,
+                    chemin_tribe=unite.chemin_tribe,
                     chemin_cneuromod=chemins.chemin_cneuromod,
-                    chemin_video=chemin_video,
-                    tribe_ses=tribe_ses,
-                    tribe_run=tribe_run,
+                    chemin_video=unite.chemin_video,
+                    cles_tribe=unite.cles_tribe,
                     tribe_layer=self.layer,
-                    cneuromod_ses=cneuromod_ses,
-                    cneuromod_dataset=cneuromod_dataset,
+                    cneuromod_ses=unite.cneuromod_ses,
+                    cneuromod_dataset=unite.cneuromod_dataset,
                     t_Tribe_s=T_TRIBE_S,
                     TR_irmf_s=TR_IRMF_S,
                     flag_delai_bold_brute=self.flag_delai_bold_brute,
                     centrage_donne_temps=self.centrage_donne_temps,
                 )
                 X_run, Y_run = normalisateur.executer_pipeline(
-                    tribe_hdf5=tribe_hdf5, cneuromod_hdf5=cneuromod_hdf5
+                    tribe_hdf5=ouvrir_tribe(unite.chemin_tribe),
+                    cneuromod_hdf5=cneuromod_hdf5,
                 )
                 X_list.append(X_run)
                 Y_list.append(Y_run)
 
-                runs_ok.append(f"{tribe_ses}/{tribe_run}")
-                num_ses = int(tribe_ses.replace("ses-", ""))
-                id_array = np.full(X_run.shape[0], num_ses)
+                runs_ok.append(unite.identifiant)
+                id_array = np.full(X_run.shape[0], unite.num_session)
                 groupes_list.append(id_array)
-                runs_list.append(np.full(X_run.shape[0], f"{tribe_ses}/{tribe_run}"))
+                runs_list.append(np.full(X_run.shape[0], unite.identifiant))
 
             print(f"\n{len(runs_ok)} runs traités avec succès")
+
+            # Sans ce contrôle, `np.concatenate([])` lève « need at least one array
+            # to concatenate », qui ne dit rien de la cause réelle — presque toujours
+            # des stimuli absents (les .mkv Friends ne sont pas distribués avec le
+            # dépôt), et non un problème d'embeddings ou d'IRMf.
+            if not runs_ok:
+                raise FileNotFoundError(
+                    f"Aucun des {len(unites)} runs de {self.subject} ({chemins.taches}) "
+                    "n'a pu être aligné. Les messages ci-dessus en donnent la raison ; "
+                    "le cas courant est l'absence des stimuli, dont la durée est "
+                    "indispensable pour retirer le padding des embeddings. Récupérer "
+                    "les vidéos (datalad get) ou lancer depuis une machine qui les a."
+                )
 
             if self.randomize_flag:
                 rng = np.random.default_rng(42)
@@ -671,11 +615,7 @@ class RidgeRegression:
             groupes = np.concatenate(groupes_list, axis=0)
             print(f"Matrice finale : X={X.shape}, Y={Y.shape}")
 
-            # Identifiant de run par échantillon (ex. "ses-014/run-03"), pas exposé
-            # dans le tuple retourné (pour ne pas casser les appelants existants) :
-            # stocké comme attribut, filtré en parallèle de X/Y/groupes par
-            # `_selection_X_Y`, et utilisé pour les diagnostics de composition des
-            # folds (cf. `_afficher_composition_runs`).
+            # Identifiant de run par échantillon (ex. "ses-014/run-03")
             self._runs_par_echantillon = np.concatenate(runs_list, axis=0)
 
             del X_list, Y_list, groupes_list, runs_list
@@ -693,7 +633,7 @@ class RidgeRegression:
         Returns :
             tuple : (X, Y, groupes), filtrés selon les arguments ci-dessus.
         """
-        runs_ok, X, Y, groupes = self.create_X_Y_total()
+        _, X, Y, groupes = self.create_X_Y_total()
         if sessions_a_exclure is not None:
             masque = ~np.isin(groupes, sessions_a_exclure)
             X, Y, groupes = X[masque], Y[masque], groupes[masque]
@@ -702,99 +642,6 @@ class RidgeRegression:
             Y = Y[:, masque_roi]
         return X, Y, groupes
 
-    def _transferer(self, X, Y):
-        """Place X et Y sur le périphérique de calcul, ou les laisse tels quels.
-
-        Le transfert n'a lieu qu'une fois par méthode de validation croisée, avant la
-        boucle de folds : les découpages qui suivent ne sont que des indexations, elles
-        restent sur le périphérique.
-
-        Args :
-            X, Y : tableaux numpy issus de `_selection_X_Y`.
-
-        Returns :
-            tuple : (X, Y) inchangés en mode CPU, convertis en tenseurs torch sinon.
-                Si la mémoire du GPU ne suffit pas, `self.peripherique` repasse à None
-                et les tableaux numpy sont renvoyés tels quels.
-        """
-        if self.peripherique is None:
-            return X, Y
-
-        import torch
-
-        octets_requis = (X.nbytes + Y.nbytes) * FACTEUR_MARGE_MEMOIRE_GPU
-        print(
-            f"[GPU] X {X.shape} + Y {Y.shape} = {(X.nbytes + Y.nbytes) / 1e9:.2f} Go, "
-            f"besoin estimé avec marge : {octets_requis / 1e9:.1f} Go"
-        )
-
-        if self.peripherique == "cuda":
-            octets_libres, _ = torch.cuda.mem_get_info()
-            if octets_requis > octets_libres:
-                print(
-                    f"[GPU] mémoire insuffisante ({octets_libres / 1e9:.1f} Go libres) : "
-                    "repli sur CPU. Réduire le scope, ou passer en précision parcelle."
-                )
-                self.peripherique = None
-                return X, Y
-
-        return (
-            torch.asarray(X, device=self.peripherique),
-            torch.asarray(Y, device=self.peripherique),
-        )
-
-    def _contexte_calcul(self):
-        """Active le dispatch API Array de scikit-learn, ou ne fait rien sur CPU.
-
-        Returns :
-            Gestionnaire de contexte à poser autour d'une boucle de folds.
-        """
-        if self.peripherique is None:
-            return nullcontext()
-        return config_context(array_api_dispatch=True)
-
-    def _ajuster_ridgecv(self, grille_alphas, X_train, Y_train, X_test):
-        """Ajuste un RidgeCV (un alpha par voxel) et prédit, en unités d'origine.
-
-        Remplace le `TransformedTargetRegressor` utilisé auparavant, qui n'est pas
-        compatible avec l'API Array : il reconvertit `y` en numpy et perd le
-        périphérique, sur CUDA comme sur MPS. La standardisation de Y est donc faite
-        explicitement ici — mêmes opérations, même ordre, mêmes résultats, mais sans
-        conversion cachée. C'est aussi déjà le motif employé par `one_cycle`.
-
-        Args :
-            grille_alphas : valeurs d'alpha à tester.
-            X_train, Y_train : données d'entraînement (numpy ou tenseurs).
-            X_test : données sur lesquelles prédire.
-
-        Returns :
-            tuple : (alphas retenus par voxel — en numpy, recalés sur la grille —,
-                prédictions ramenées à l'échelle d'origine de Y).
-        """
-        scaler_Y = StandardScaler()
-        Y_train_scaled = scaler_Y.fit_transform(Y_train)
-
-        # alpha_per_target=True : un alpha par voxel, uniquement compatible avec cv=None (LOO).
-        modele = make_pipeline(
-            StandardScaler(),
-            RidgeCV(alphas=grille_alphas, alpha_per_target=True, cv=None, scoring="r2"),
-        )
-        modele.fit(X_train, Y_train_scaled)
-
-        Y_pred = scaler_Y.inverse_transform(modele.predict(X_test))
-
-        # `alpha_` est toujours un MEMBRE de la grille, mais sur GPU il revient dans le
-        # dtype du périphérique (float32) : la valeur est alors arrondie — jusqu'à 109
-        # en absolu pour alpha=1e10. Sans conséquence sur les moyennes géométriques,
-        # mais assez pour faire basculer un alpha d'un bin à l'autre dans l'histogramme.
-        # On le recale donc sur la grille float64, en log car elle s'étale sur 11 décades.
-        grille = np.asarray(grille_alphas, dtype=np.float64)
-        alphas_retenus = _vers_numpy(modele.named_steps["ridgecv"].alpha_)
-        indices = np.abs(
-            np.log(grille)[None, :] - np.log(alphas_retenus)[:, None]
-        ).argmin(axis=1)
-        return grille[indices], Y_pred
-
     def _splitter_externe(
         self, niveau_split, groupes, n_folds, test_size, seed, n_buffer=1
     ):
@@ -802,16 +649,12 @@ class RidgeRegression:
 
         Args :
             niveau_split : "session" (tirage de sessions entières) ou "run" (LORO
-                aléatoire). Aucun des deux ne domine l'autre : la session est plus
-                stricte sur les confusions à l'échelle du jour, le run supprime la
-                contiguïté temporelle immédiate mais laisse les runs frères de la
-                session testée en train (cf. docstring de `GroupShuffleSplitRun`).
+                aléatoire).
             groupes : numéro de session par échantillon (utilisé si "session").
             n_folds, test_size, seed : passés tels quels au splitter.
             n_buffer : nombre de runs écartés de part et d'autre de chaque run de
                 test ; ignoré si niveau_split="session". n_buffer=0 conserve la
-                taille de train du niveau session, ce qui isole l'effet « runs
-                frères » de l'effet « moins de données ».
+                taille de train du niveau session.
 
         Returns :
             tuple : (splitter, groupes_du_split) à donner à `splitter.split(...)`.
@@ -851,26 +694,33 @@ class RidgeRegression:
                 plages.append(f"{positions[d]}-{positions[f]}")
         return plages
 
-    def _afficher_composition_runs(self, groupes, runs, train_idx, test_idx):
-        """Affiche, pour chaque session dont des runs se retrouvent à la fois en
-        train et en test, le détail des runs de chaque côté (juste les numéros de
-        run, la session est déjà donnée par la ligne). Pour un run coupé (présent
-        des deux côtés), affiche en plus les plages de TR (position dans le run,
-        0 = premier TR acquis) envoyées en train / test / ni l'un ni l'autre
-        (TR retirés par `trim_size`), et signale explicitement tout TR qui
-        apparaîtrait à la fois en train ET en test (ne devrait structurellement
-        jamais arriver : `create_chunked_folds_trimmed` partitionne les chunks
-        sans recouvrement — ce contrôle sert à le vérifier plutôt qu'à le supposer).
+    def _numeroter_runs(self, runs):
+        """Associe un entier à chaque identifiant de run, pour l'affichage.
 
-        Diagnostic pensé pour les splits qui ignorent la structure de session (ex.
-        `create_chunked_folds_trimmed`, dont les chunks sont des runs individuels) :
-        une session "coupée" signifie que certains de ses runs sont en train et
-        d'autres en test, donc une fuite potentielle (même session, même jour,
-        même bruit physiologique/drift des deux côtés). Un run "coupé" (TR en
-        train et TR en test dans le MÊME run) indique en plus que `chunk_length`
-        n'est pas alignée sur les frontières réelles de run (ex. runs de longueur
-        variable après normalisation) : le point de coupure tombe alors n'importe
-        où au milieu du run, pas à son bord.
+        Things numérote ses runs explicitement ("ses-014/run-3" -> 3). Friends
+        identifie ses unités par épisode ("s01e01a"), sans numéro de run : on
+        retombe alors sur un rang attribué dans l'ordre d'apparition, qui suffit
+        pour distinguer les unités dans le diagnostic de fuite.
+
+        Args :
+            runs : identifiant de run par échantillon.
+
+        Returns :
+            np.ndarray : un entier par échantillon.
+        """
+        identifiants = [str(r) for r in runs]
+        if all("run-" in i for i in identifiants):
+            return np.array([int(i.rsplit("run-", 1)[1]) for i in identifiants])
+
+        rangs = {}
+        for identifiant in identifiants:
+            if identifiant not in rangs:
+                rangs[identifiant] = len(rangs) + 1
+        return np.array([rangs[i] for i in identifiants])
+
+    def _afficher_composition_runs(self, groupes, runs, train_idx, test_idx):
+        """Signale les fuites de découpage : sessions, puis runs, à cheval sur
+        train et test.
 
         Args :
             groupes : numéro de session par échantillon (retourné par `_selection_X_Y`).
@@ -884,7 +734,7 @@ class RidgeRegression:
         est_train[train_idx] = True
         est_test[test_idx] = True
 
-        run_numeros = np.array([int(str(r).rsplit("run-", 1)[1]) for r in runs])
+        run_numeros = self._numeroter_runs(runs)
 
         sessions_toutes = sorted(set(int(s) for s in groupes))
         sessions_train = set(int(s) for s in groupes[train_idx])
@@ -930,6 +780,8 @@ class RidgeRegression:
 
                 print(f"        run-{r} ({len(indices_run)} TR) : {detail}")
 
+                # Ne devrait structurellement jamais arriver (les splitters du projet
+                # partitionnent sans recouvrement) : on le vérifie au lieu de le supposer.
                 chevauchement = train_run & test_run
                 if chevauchement.any():
                     plages_dup = self._plages_contigues(np.where(chevauchement)[0])
@@ -953,7 +805,7 @@ class RidgeRegression:
         Raises :
             ValueError : si une ROI demandée est absente du fichier.
         """
-        chemins = self.get_path_file_by_plateform(self.plateforme)
+        chemins = self.chemins
 
         masque = None
         rois_trouvees = {}
@@ -993,7 +845,7 @@ class RidgeRegression:
             np.ndarray : masque booléen, une entrée par parcelle (True = dans un des
                 réseaux demandés).
         """
-        chemins = self.get_path_file_by_plateform(self.plateforme)
+        chemins = self.chemins
         annotations = pd.read_csv(chemins.chemin_annotations_parcelles, sep="\t")
 
         pattern = "|".join(f"_{reseau}_" for reseau in reseaux)
@@ -1014,7 +866,7 @@ class RidgeRegression:
         masque_roi=None,
     ):
         """Validation croisée imbriquée 100% manuelle : sélection d'alpha par voxel/
-        parcelle via `LeaveOneGroupOut` (une session isolée à la fois) et refit
+        parcelle via `LeaveOneGroupOut` (une session ou un run isolée à la fois) et refit
         explicite d'un `Ridge` pour chaque alpha de la grille sur chaque fold interne.
 
         Args :
@@ -1054,122 +906,105 @@ class RidgeRegression:
         best_alphas_inner_toutes_folds = []
 
         # 2. BOUCLE EXTERNE : Évaluation de la stabilité du modèle
-        X, Y = self._transferer(X, Y)
-        with self._contexte_calcul():
-            for i, (train_idx, test_idx) in enumerate(
-                outer_cv.split(X, Y, groupes_split)
-            ):
-                print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
+        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes_split)):
+            print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
 
-                X_train, Y_train, groupes_train = (
-                    X[train_idx],
-                    Y[train_idx],
-                    groupes[train_idx],
+            X_train, Y_train, groupes_train = (
+                X[train_idx],
+                Y[train_idx],
+                groupes[train_idx],
+            )
+            X_test, Y_test = X[test_idx], Y[test_idx]
+
+            print(
+                f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples"
+            )
+            self._afficher_composition_runs(
+                groupes, self._runs_par_echantillon, train_idx, test_idx
+            )
+
+            inner_cv = LeaveOneGroupOut()
+            inner_splits = list(inner_cv.split(X_train, Y_train, groups=groupes_train))
+
+            # SST du R² poolé : indépendant de l'alpha/fold, calculé une seule fois sur
+            # tout Y_train (le LOGO partitionne sans recouvrement).
+            Y_train_moyenne = Y_train.mean(axis=0)
+            sst_total = np.sum((Y_train - Y_train_moyenne) ** 2, axis=0)
+
+            # Accumulateur du numérateur du R² poolé (SSR), un par alpha.
+            ssr_cumul_par_alpha = np.zeros(
+                (len(grille_alphas), n_features), dtype=np.float64
+            )
+
+            # On teste chaque fold interne (une session / un run isolée en validation)
+            for inner_train_idx, inner_val_idx in inner_splits:
+                # Standardisation locale stricte au fold interne (0 fuite)
+                scaler_X_inner = StandardScaler()
+                X_inner_train_scaled = scaler_X_inner.fit_transform(
+                    X_train[inner_train_idx]
                 )
-                X_test, Y_test = X[test_idx], Y[test_idx]
+                X_inner_val_scaled = scaler_X_inner.transform(X_train[inner_val_idx])
 
-                print(
-                    f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples"
-                )
-                self._afficher_composition_runs(
-                    groupes, self._runs_par_echantillon, train_idx, test_idx
+                scaler_Y_inner = StandardScaler()
+                Y_inner_train_scaled = scaler_Y_inner.fit_transform(
+                    Y_train[inner_train_idx]
                 )
 
-                inner_cv = LeaveOneGroupOut()
-                inner_splits = list(
-                    inner_cv.split(X_train, Y_train, groups=groupes_train)
-                )
+                # Unités brutes, requis pour accumuler des résidus cohérents entre folds
+                # (chaque fold a son propre scaler_Y_inner).
+                Y_inner_val_brut = Y_train[inner_val_idx]
 
-                # SST du R² poolé : indépendant de l'alpha/fold, calculé une seule fois sur
-                # tout Y_train (le LOGO partitionne sans recouvrement). La forme méthode
-                # `.sum(axis=0)` marche en numpy comme en torch, contrairement à `np.sum`
-                # qui lève sur un tenseur GPU ; le résultat revient en numpy tout de suite,
-                # pour que l'arithmétique du R² poolé plus bas reste inchangée.
-                Y_train_moyenne = Y_train.mean(axis=0)
-                sst_total = _vers_numpy(((Y_train - Y_train_moyenne) ** 2).sum(axis=0))
+                # R² de ce fold interne uniquement : diagnostic, ne sert pas à choisir l'alpha final.
+                r2_par_alpha_ce_fold = np.zeros((len(grille_alphas), n_features))
 
-                # Accumulateur du numérateur du R² poolé (SSR), un par alpha.
-                ssr_cumul_par_alpha = np.zeros(
-                    (len(grille_alphas), n_features), dtype=np.float64
-                )
-
-                # On teste chaque fold interne (une session isolée en validation)
-                for inner_train_idx, inner_val_idx in inner_splits:
-                    # Standardisation locale stricte au fold interne (0 fuite)
-                    scaler_X_inner = StandardScaler()
-                    X_inner_train_scaled = scaler_X_inner.fit_transform(
-                        X_train[inner_train_idx]
-                    )
-                    X_inner_val_scaled = scaler_X_inner.transform(
-                        X_train[inner_val_idx]
-                    )
-
-                    scaler_Y_inner = StandardScaler()
-                    Y_inner_train_scaled = scaler_Y_inner.fit_transform(
-                        Y_train[inner_train_idx]
-                    )
-
-                    # Unités brutes, requis pour accumuler des résidus cohérents entre folds
-                    # (chaque fold a son propre scaler_Y_inner).
-                    Y_inner_val_brut = Y_train[inner_val_idx]
-
-                    # R² de CE fold interne uniquement : diagnostic, ne sert pas à choisir l'alpha final.
-                    r2_par_alpha_ce_fold = np.zeros((len(grille_alphas), n_features))
-
-                    for a_idx, alpha in enumerate(grille_alphas):
-                        ridge_inner = Ridge(alpha=alpha)
-                        ridge_inner.fit(X_inner_train_scaled, Y_inner_train_scaled)
-                        Y_inner_pred_scaled = ridge_inner.predict(X_inner_val_scaled)
-                        Y_inner_pred_brut = scaler_Y_inner.inverse_transform(
-                            Y_inner_pred_scaled
-                        )
-
-                        # Numérateur (SSR) du R² poolé, accumulé across folds.
-                        ssr_cumul_par_alpha[a_idx, :] += _vers_numpy(
-                            ((Y_inner_val_brut - Y_inner_pred_brut) ** 2).sum(axis=0)
-                        )
-                        r2_par_alpha_ce_fold[a_idx, :] = _vers_numpy(
-                            r2_score(
-                                Y_inner_val_brut,
-                                Y_inner_pred_brut,
-                                multioutput="raw_values",
-                            )
-                        )
-
-                    best_indices_fold = np.argmax(r2_par_alpha_ce_fold, axis=0)
-                    best_alphas_inner_toutes_folds.append(
-                        grille_alphas[best_indices_fold]
+                for a_idx, alpha in enumerate(grille_alphas):
+                    ridge_inner = Ridge(alpha=alpha)
+                    ridge_inner.fit(X_inner_train_scaled, Y_inner_train_scaled)
+                    Y_inner_pred_scaled = ridge_inner.predict(X_inner_val_scaled)
+                    Y_inner_pred_brut = scaler_Y_inner.inverse_transform(
+                        Y_inner_pred_scaled
                     )
 
-                # R² poolé sur toutes les prédictions internes réunies (plus stable qu'une
-                # moyenne de R² calculés séparément par petit fold interne).
-                r2_par_alpha_poole = 1 - (ssr_cumul_par_alpha / sst_total)
-                best_indices = np.argmax(r2_par_alpha_poole, axis=0)
-                alpha_optimal = grille_alphas[best_indices]
-                alphas_tous_externes[i, :] = alpha_optimal
+                    # Numérateur (SSR) du R² poolé, accumulé across folds.
+                    ssr_cumul_par_alpha[a_idx, :] += np.sum(
+                        (Y_inner_val_brut - Y_inner_pred_brut) ** 2, axis=0
+                    )
+                    r2_par_alpha_ce_fold[a_idx, :] = r2_score(
+                        Y_inner_val_brut, Y_inner_pred_brut, multioutput="raw_values"
+                    )
 
-                # Standardisation du set externe
-                scaler_X = StandardScaler()
-                X_train_scaled = scaler_X.fit_transform(X_train)
-                X_test_scaled = scaler_X.transform(X_test)
+                best_indices_fold = np.argmax(r2_par_alpha_ce_fold, axis=0)
+                best_alphas_inner_toutes_folds.append(grille_alphas[best_indices_fold])
 
-                scaler_Y = StandardScaler()
-                Y_train_scaled = scaler_Y.fit_transform(Y_train)
-                Y_test_scaled = scaler_Y.transform(Y_test)
+            # R² poolé sur toutes les prédictions internes réunies (plus stable qu'une
+            # moyenne de R² calculés séparément par petit fold interne).
+            r2_par_alpha_poole = 1 - (ssr_cumul_par_alpha / sst_total)
+            best_indices = np.argmax(r2_par_alpha_poole, axis=0)
+            alpha_optimal = grille_alphas[best_indices]
+            alphas_tous_externes[i, :] = alpha_optimal
 
-                ridge_final = Ridge(alpha=alpha_optimal)
-                ridge_final.fit(X_train_scaled, Y_train_scaled)
-                Y_pred_scaled = ridge_final.predict(X_test_scaled)
+            # Standardisation du set externe
+            scaler_X = StandardScaler()
+            X_train_scaled = scaler_X.fit_transform(X_train)
+            X_test_scaled = scaler_X.transform(X_test)
 
-                r2_score_fold = _vers_numpy(
-                    r2_score(Y_test_scaled, Y_pred_scaled, multioutput="raw_values")
-                )
-                r2_tous_les_tests[i, :] = r2_score_fold
-                print(f"-> R2 mean : {np.mean(r2_score_fold)}")
-                print(f"-> R2 max : {np.max(r2_score_fold)}")
+            scaler_Y = StandardScaler()
+            Y_train_scaled = scaler_Y.fit_transform(Y_train)
+            Y_test_scaled = scaler_Y.transform(Y_test)
 
-                del ridge_final, Y_pred_scaled
-                gc.collect()
+            ridge_final = Ridge(alpha=alpha_optimal)
+            ridge_final.fit(X_train_scaled, Y_train_scaled)
+            Y_pred_scaled = ridge_final.predict(X_test_scaled)
+
+            r2_score_fold = r2_score(
+                Y_test_scaled, Y_pred_scaled, multioutput="raw_values"
+            )
+            r2_tous_les_tests[i, :] = r2_score_fold
+            print(f"-> R2 mean : {np.mean(r2_score_fold)}")
+            print(f"-> R2 max : {np.max(r2_score_fold)}")
+
+            del ridge_final, Y_pred_scaled
+            gc.collect()
 
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
@@ -1217,12 +1052,8 @@ class RidgeRegression:
                 interne explicite ici, l'alpha est choisi en interne par `RidgeCV`).
 
         Notes :
-            LOO (par timepoint) au lieu de LOGO (par session) est la seule différence
-            algorithmique avec `nested_cross_validation_full_manuel`. Le LOO ignore la
-            structure de session/autocorrélation temporelle que LOGO respectait pour
-            la sélection d'alpha : les alphas et R² obtenus ne sont donc pas
-            strictement comparables scientifiquement entre les deux méthodes,
-            seulement en termes de mécanique/temps de calcul.
+            LOO (par TR) au lieu de LOGO (par session) est la seule différence
+            algorithmique avec `nested_cross_validation_full_manuel`.
         """
         X, Y, groupes = self._selection_X_Y(masque_roi=masque_roi)
         n_features = Y.shape[1]
@@ -1234,39 +1065,48 @@ class RidgeRegression:
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
 
-        X, Y = self._transferer(X, Y)
-        with self._contexte_calcul():
-            for i, (train_idx, test_idx) in enumerate(
-                outer_cv.split(X, Y, groupes_split)
-            ):
-                print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
+        for i, (train_idx, test_idx) in enumerate(outer_cv.split(X, Y, groupes_split)):
+            print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
 
-                X_train, Y_train = X[train_idx], Y[train_idx]
-                X_test, Y_test = X[test_idx], Y[test_idx]
+            X_train, Y_train = X[train_idx], Y[train_idx]
+            X_test, Y_test = X[test_idx], Y[test_idx]
 
-                print(
-                    f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples"
-                )
-                self._afficher_composition_runs(
-                    groupes, self._runs_par_echantillon, train_idx, test_idx
-                )
+            print(
+                f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples"
+            )
+            self._afficher_composition_runs(
+                groupes, self._runs_par_echantillon, train_idx, test_idx
+            )
 
-                alphas_fold, Y_pred = self._ajuster_ridgecv(
-                    grille_alphas, X_train, Y_train, X_test
-                )
+            # alpha_per_target=True : un alpha par voxel, uniquement compatible avec cv=None (LOO).
+            # TransformedTargetRegressor standardise/dé-standardise Y automatiquement.
+            modele = TransformedTargetRegressor(
+                regressor=make_pipeline(
+                    StandardScaler(),
+                    RidgeCV(
+                        alphas=grille_alphas,
+                        alpha_per_target=True,
+                        cv=None,
+                        scoring="r2",
+                    ),
+                ),
+                transformer=StandardScaler(),
+            )
+            modele.fit(X_train, Y_train)
 
-                # Conversion au point de production : tout ce qui suit reste du numpy.
-                alphas_tous_externes[i, :] = _vers_numpy(alphas_fold)
-                r2_score_fold = _vers_numpy(
-                    r2_score(Y_test, Y_pred, multioutput="raw_values")
-                )
-                r2_tous_les_tests[i, :] = r2_score_fold
-                print(f"-> R2 mean : {np.mean(r2_score_fold)}")
-                print(f"-> R2 max : {np.max(r2_score_fold)}")
+            ridgecv_ajuste = modele.regressor_.named_steps["ridgecv"]
+            alphas_tous_externes[i, :] = ridgecv_ajuste.alpha_
 
-                # Nettoyage mémoire
-                del Y_pred
-                gc.collect()
+            # Prédictions déjà ramenées à l'échelle d'origine par TransformedTargetRegressor
+            Y_pred = modele.predict(X_test)
+            r2_score_fold = r2_score(Y_test, Y_pred, multioutput="raw_values")
+            r2_tous_les_tests[i, :] = r2_score_fold
+            print(f"-> R2 mean : {np.mean(r2_score_fold)}")
+            print(f"-> R2 max : {np.max(r2_score_fold)}")
+
+            # Nettoyage mémoire
+            del modele, Y_pred
+            gc.collect()
 
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
@@ -1294,7 +1134,7 @@ class RidgeRegression:
         remplacé par `create_chunked_folds_trimmed` (litcoder_core, voir
         `src/litcoder_folding.py`) au lieu de `GroupShuffleSplitSession`.
 
-        Contrairement au splitter à tirage aléatoire, ce découpage est une PARTITION :
+        Contrairement au splitter à tirage aléatoire, ce découpage est une partition :
         chaque chunk est en test exactement une fois sur les `n_folds` folds.
 
         Args :
@@ -1340,38 +1180,49 @@ class RidgeRegression:
         r2_tous_les_tests = np.zeros((n_folds, n_features), dtype=np.float32)
         alphas_tous_externes = np.zeros((n_folds, n_features), dtype=np.float64)
 
-        X, Y = self._transferer(X, Y)
-        with self._contexte_calcul():
-            for i, (train_idx, test_idx) in enumerate(folds):
-                print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
+        for i, (train_idx, test_idx) in enumerate(folds):
+            print(f"  -> Début du Fold externe {i + 1}/{n_folds}...")
 
-                train_idx, test_idx = np.array(train_idx), np.array(test_idx)
-                X_train, Y_train = X[train_idx], Y[train_idx]
-                X_test, Y_test = X[test_idx], Y[test_idx]
+            train_idx, test_idx = np.array(train_idx), np.array(test_idx)
+            X_train, Y_train = X[train_idx], Y[train_idx]
+            X_test, Y_test = X[test_idx], Y[test_idx]
 
-                print(
-                    f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples"
-                )
-                self._afficher_composition_runs(
-                    groupes, self._runs_par_echantillon, train_idx, test_idx
-                )
+            print(
+                f"    Train : {len(train_idx)} samples, Test : {len(test_idx)} samples"
+            )
+            self._afficher_composition_runs(
+                groupes, self._runs_par_echantillon, train_idx, test_idx
+            )
 
-                alphas_fold, Y_pred = self._ajuster_ridgecv(
-                    grille_alphas, X_train, Y_train, X_test
-                )
+            # alpha_per_target=True : un alpha par voxel, uniquement compatible avec cv=None (LOO).
+            # TransformedTargetRegressor standardise/dé-standardise Y automatiquement.
+            modele = TransformedTargetRegressor(
+                regressor=make_pipeline(
+                    StandardScaler(),
+                    RidgeCV(
+                        alphas=grille_alphas,
+                        alpha_per_target=True,
+                        cv=None,
+                        scoring="r2",
+                    ),
+                ),
+                transformer=StandardScaler(),
+            )
+            modele.fit(X_train, Y_train)
 
-                # Conversion au point de production : tout ce qui suit reste du numpy.
-                alphas_tous_externes[i, :] = _vers_numpy(alphas_fold)
-                r2_score_fold = _vers_numpy(
-                    r2_score(Y_test, Y_pred, multioutput="raw_values")
-                )
-                r2_tous_les_tests[i, :] = r2_score_fold
-                print(f"-> R2 mean : {np.mean(r2_score_fold)}")
-                print(f"-> R2 max : {np.max(r2_score_fold)}")
+            ridgecv_ajuste = modele.regressor_.named_steps["ridgecv"]
+            alphas_tous_externes[i, :] = ridgecv_ajuste.alpha_
 
-                # Nettoyage mémoire
-                del Y_pred
-                gc.collect()
+            # Prédictions déjà ramenées à l'échelle d'origine par TransformedTargetRegressor
+            Y_pred = modele.predict(X_test)
+            r2_score_fold = r2_score(Y_test, Y_pred, multioutput="raw_values")
+            r2_tous_les_tests[i, :] = r2_score_fold
+            print(f"-> R2 mean : {np.mean(r2_score_fold)}")
+            print(f"-> R2 max : {np.max(r2_score_fold)}")
+
+            # Nettoyage mémoire
+            del modele, Y_pred
+            gc.collect()
 
         r2_moyen = np.mean(r2_tous_les_tests, axis=0)
         r2_variance_inter_folds = np.var(r2_tous_les_tests, axis=0)
@@ -1394,11 +1245,10 @@ class RidgeRegression:
                 (listes de numéros de session).
 
         Notes :
-            - Test FIXE, identique pour tous les folds : {14, 15, 16}.
+            - Test fixe, identique pour tous les folds : {14, 15, 16}.
             - Buffer autour du Test, toujours exclu (jamais Train ni Validation) : {13, 17}.
             - Validation et son buffer : donnés explicitement par `FOLDS_VALIDATION_ONE_CYCLE`
-              (8 blocs, bornes et buffers exacts du protocole — pas dérivés d'une règle
-              générique de tuilage).
+              (8 blocs, bornes et buffers exacts
             - Train : tout le reste (ni Test, ni buffer Test, ni Validation, ni buffer
               Validation, pour ce fold).
         """
@@ -1451,6 +1301,20 @@ class RidgeRegression:
               il est mécaniquement plus haut. Il n'est affiché que dans la figure
               accuracy (aucune carte cérébrale dédiée).
         """
+        # Le protocole est défini pour les 36 sessions de Things (test fixe en
+        # 14-16). Sur Friends, les sessions vont jusqu'à 56 avec des trous : 14-16
+        # existent, donc la méthode tournerait SANS lever sur un découpage dénué de
+        # sens. D'où cette garde explicite plutôt qu'une confiance dans l'erreur
+        # « aucun fold évaluable ».
+        if self.taches != "things":
+            raise ValueError(
+                f"nested_cross_validation_one_cycle ne s'applique qu'à Things "
+                f"(protocole fixe : {NB_SESSIONS_TOTAL} sessions, test "
+                f"{list(SESSIONS_TEST_ONE_CYCLE)}), or taches={self.taches!r}. "
+                "Utiliser nested_cross_validation_ridgecv_loo(niveau_split='session'), "
+                "qui ne fait aucune hypothèse sur le nombre de sessions."
+            )
+
         X, Y, groupes = self._selection_X_Y(masque_roi=masque_roi)
         n_features = Y.shape[1]
 
@@ -1472,95 +1336,89 @@ class RidgeRegression:
         # comme un vrai R² nul, tirant la moyenne vers le bas.
         folds_evalues = []
 
-        X, Y = self._transferer(X, Y)
-        with self._contexte_calcul():
-            for i, fold in enumerate(folds):
+        for i, fold in enumerate(folds):
+            print(
+                f"  -> Début du Fold {i + 1}/{n_folds} (Validation={fold['validation']})..."
+            )
+
+            masque_train = np.isin(groupes, fold["train"])
+            masque_val = np.isin(groupes, fold["validation"])
+            masque_test = np.isin(groupes, fold["test"])
+
+            if not masque_val.any() or not masque_test.any():
                 print(
-                    f"  -> Début du Fold {i + 1}/{n_folds} (Validation={fold['validation']})..."
+                    f"     Fold {i + 1} ignoré : Validation ou Test vide pour {self.subject} (sessions manquantes dans les données)."
+                )
+                continue
+
+            X_train, Y_train = X[masque_train], Y[masque_train]
+            X_val, Y_val = X[masque_val], Y[masque_val]
+            X_test, Y_test = X[masque_test], Y[masque_test]
+
+            # Sélection de l'alpha optimal par voxel sur l'unique split Train -> Validation
+            # (0 fuite : standardisation fit sur Train seul)
+            scaler_X_selection = StandardScaler()
+            X_train_scaled_selection = scaler_X_selection.fit_transform(X_train)
+            X_val_scaled = scaler_X_selection.transform(X_val)
+
+            scaler_Y_selection = StandardScaler()
+            Y_train_scaled_selection = scaler_Y_selection.fit_transform(Y_train)
+
+            r2_par_alpha = np.zeros((len(grille_alphas), n_features))
+            for a_idx, alpha in enumerate(grille_alphas):
+                ridge_selection = Ridge(alpha=alpha)
+                ridge_selection.fit(X_train_scaled_selection, Y_train_scaled_selection)
+                Y_val_pred_scaled = ridge_selection.predict(X_val_scaled)
+
+                # Retour en unités brutes avant de scorer, comme _RidgeGCV._score()
+                # qui compare toujours ses prédictions à "unscaled_y" (jamais à la
+                # cible standardisée utilisée pour le fit).
+                Y_val_pred_brut = scaler_Y_selection.inverse_transform(
+                    Y_val_pred_scaled
+                )
+                r2_par_alpha[a_idx, :] = r2_score(
+                    Y_val, Y_val_pred_brut, multioutput="raw_values"
                 )
 
-                # `groupes` reste numpy : ces masques indexent X et Y sans les convertir.
-                masque_train = np.isin(groupes, fold["train"])
-                masque_val = np.isin(groupes, fold["validation"])
-                masque_test = np.isin(groupes, fold["test"])
+            alpha_optimal = grille_alphas[np.argmax(r2_par_alpha, axis=0)]
+            alphas_tous_externes[i, :] = alpha_optimal
 
-                if not masque_val.any() or not masque_test.any():
-                    print(
-                        f"     Fold {i + 1} ignoré : Validation ou Test vide pour {self.subject} (sessions manquantes dans les données)."
-                    )
-                    continue
+            # Réentraînement final sur Train + Validation, évaluation sur le Test fixe
+            X_train_val = np.concatenate([X_train, X_val], axis=0)
+            Y_train_val = np.concatenate([Y_train, Y_val], axis=0)
 
-                X_train, Y_train = X[masque_train], Y[masque_train]
-                X_val, Y_val = X[masque_val], Y[masque_val]
-                X_test, Y_test = X[masque_test], Y[masque_test]
+            scaler_X = StandardScaler()
+            X_train_val_scaled = scaler_X.fit_transform(X_train_val)
+            X_test_scaled = scaler_X.transform(X_test)
 
-                # Sélection de l'alpha optimal par voxel sur l'unique split Train -> Validation
-                # (0 fuite : standardisation fit sur Train seul)
-                scaler_X_selection = StandardScaler()
-                X_train_scaled_selection = scaler_X_selection.fit_transform(X_train)
-                X_val_scaled = scaler_X_selection.transform(X_val)
+            scaler_Y = StandardScaler()
+            Y_train_val_scaled = scaler_Y.fit_transform(Y_train_val)
+            Y_test_scaled = scaler_Y.transform(Y_test)
 
-                scaler_Y_selection = StandardScaler()
-                Y_train_scaled_selection = scaler_Y_selection.fit_transform(Y_train)
+            ridge_final = Ridge(alpha=alpha_optimal)
+            ridge_final.fit(X_train_val_scaled, Y_train_val_scaled)
+            Y_pred_scaled = ridge_final.predict(X_test_scaled)
 
-                r2_par_alpha = np.zeros((len(grille_alphas), n_features))
-                for a_idx, alpha in enumerate(grille_alphas):
-                    ridge_selection = Ridge(alpha=alpha)
-                    ridge_selection.fit(
-                        X_train_scaled_selection, Y_train_scaled_selection
-                    )
-                    Y_val_pred_scaled = ridge_selection.predict(X_val_scaled)
+            r2_score_fold = r2_score(
+                Y_test_scaled, Y_pred_scaled, multioutput="raw_values"
+            )
 
-                    # Retour en unités brutes avant de scorer, comme _RidgeGCV._score()
-                    # qui compare toujours ses prédictions à "unscaled_y" (jamais à la
-                    # cible standardisée utilisée pour le fit).
-                    Y_val_pred_brut = scaler_Y_selection.inverse_transform(
-                        Y_val_pred_scaled
-                    )
-                    r2_par_alpha[a_idx, :] = _vers_numpy(
-                        r2_score(Y_val, Y_val_pred_brut, multioutput="raw_values")
-                    )
+            # `pearsonr` est vectorisé par colonne via `axis=0` (SciPy >= 1.13) : une
+            # corrélation par voxel/parcelle, sans boucle Python. Un voxel plat ou une
+            # prédiction plate donne NaN (écart-type nul) ramené à 0, comme un
+            # "aucune corrélation détectable", pour ne pas contaminer les agrégations.
+            pearson_score_fold = np.nan_to_num(
+                pearsonr(Y_test_scaled, Y_pred_scaled, axis=0).statistic, nan=0.0
+            )
 
-                # `alpha_optimal` reste numpy : Ridge l'accepte tel quel même quand X et
-                # Y sont sur le périphérique (vérifié).
-                alpha_optimal = grille_alphas[np.argmax(r2_par_alpha, axis=0)]
-                alphas_tous_externes[i, :] = alpha_optimal
+            r2_tous_les_tests[i, :] = r2_score_fold
+            pearson_tous_les_tests[i, :] = pearson_score_fold
+            folds_evalues.append(i)
+            print(f"-> R2 max : {np.max(r2_score_fold)}")
+            print(f"-> Pearson max : {np.max(pearson_score_fold)}")
 
-                # Réentraînement final sur Train + Validation, évaluation sur le Test fixe
-                X_train_val = _concatener([X_train, X_val], axis=0)
-                Y_train_val = _concatener([Y_train, Y_val], axis=0)
-
-                scaler_X = StandardScaler()
-                X_train_val_scaled = scaler_X.fit_transform(X_train_val)
-                X_test_scaled = scaler_X.transform(X_test)
-
-                scaler_Y = StandardScaler()
-                Y_train_val_scaled = scaler_Y.fit_transform(Y_train_val)
-                Y_test_scaled = scaler_Y.transform(Y_test)
-
-                ridge_final = Ridge(alpha=alpha_optimal)
-                ridge_final.fit(X_train_val_scaled, Y_train_val_scaled)
-                Y_pred_scaled = ridge_final.predict(X_test_scaled)
-
-                r2_score_fold = _vers_numpy(
-                    r2_score(Y_test_scaled, Y_pred_scaled, multioutput="raw_values")
-                )
-
-                # Une corrélation par voxel/parcelle, sans boucle Python. Un voxel plat
-                # ou une prédiction plate donne une corrélation indéfinie, ramenée à 0
-                # dans `_pearson_par_colonne` pour ne pas contaminer les agrégations.
-                pearson_score_fold = _vers_numpy(
-                    _pearson_par_colonne(Y_test_scaled, Y_pred_scaled)
-                )
-
-                r2_tous_les_tests[i, :] = r2_score_fold
-                pearson_tous_les_tests[i, :] = pearson_score_fold
-                folds_evalues.append(i)
-                print(f"-> R2 max : {np.max(r2_score_fold)}")
-                print(f"-> Pearson max : {np.max(pearson_score_fold)}")
-
-                del ridge_final, Y_pred_scaled
-                gc.collect()
+            del ridge_final, Y_pred_scaled
+            gc.collect()
 
         if not folds_evalues:
             raise ValueError(
@@ -1568,7 +1426,7 @@ class RidgeRegression:
                 f"Test {sorted(set(SESSIONS_TEST_ONE_CYCLE))} sont absentes des données."
             )
 
-        # On restreint AVANT d'agréger : les folds sautés ne doivent peser ni sur la
+        # On restreint avant d'agréger : les folds sautés ne doivent peser ni sur la
         # moyenne, ni sur la variance inter-folds, ni sur les tableaux renvoyés (qui
         # alimentent les barres d'erreur de `plot_accuracy`).
         if len(folds_evalues) < n_folds:
@@ -1600,30 +1458,31 @@ class RidgeRegression:
 
 if __name__ == "__main__":
     # Point d'entrée : pour chaque sujet, lance les méthodes de validation croisée
-    # ("one_cycle" — protocole CNeuroMod-THINGS —, et son jumeau "ridgecv_loo") sur
-    # plusieurs zones cérébrales ("scopes"), différentes selon la précision :
+    #  sur plusieurs zones cérébrales ("scopes"), différentes selon la précision :
     # - précision parcelle : toutes les parcelles / parcelles visuelles (Vis) /
     #   parcelles visuelles + attention dorsale (Vis + DorsAttn) ;
     # - précision voxel : cerveau entier / union des ROIs rétinotopiques visuelles
     #   et des ROIs catégorielles (fLoc).
 
     # --- PARAMÈTRES ---
-    plateforme = ["Rorqual", "Mac"]
-    plateforme = plateforme[1]
-
+    # Aucune plateforme à déclarer : les fichiers sont découverts par recherche
+    # depuis la racine du dépôt puis son parent, ce qui couvre indifféremment le
+    # poste local et le cluster.
     liste_sujets = ["sub-01", "sub-02", "sub-03", "sub-06"]
     liste_sujets = liste_sujets[2:3]
     LAYER = "encoder_layer7_ffn"
+
+    # Seule la tâche est déclarée : la forme des embeddings (fichier unique par
+    # sujet et clés ses/run, ou un fichier plat par épisode) est découverte sur
+    # le disque. Elle détermine aussi la validation croisée disponible — le
+    # protocole `one_cycle` est propre aux 36 sessions de Things (cf. le dict
+    # `methodes` plus bas).
+    TACHES = "things"  # "things" ou "friends"
 
     flag_delai_bold_brute = True
     centrage_donne_temps = False
     flag_precision_voxel = False
     ROImask_flag = False
-    # Régressions sur GPU via l'API Array de scikit-learn. Surtout utile en précision
-    # voxel, où Y pèse ~17 Go contre 0,2 Go en parcelles. Sans périphérique disponible
-    # ou sans mémoire suffisante, l'analyse retombe sur CPU en le signalant. Les
-    # résultats sont les mêmes des deux côtés, seul le temps de calcul change.
-    flag_gpu = False
 
     alphas = np.logspace(-1, 10, 20)
 
@@ -1631,22 +1490,18 @@ if __name__ == "__main__":
         print(f"\n{'=' * 60}\n  Sujet : {SUB}\n{'=' * 60}")
 
         ridge = RidgeRegression(
-            plateforme,
             SUB,
             LAYER,
             flag_delai_bold_brute,
             centrage_donne_temps,
             flag_precision_voxel,
             ROImask_flag,
+            taches=TACHES,
             randomize_flag=False,
-            flag_gpu=flag_gpu,
         )
 
-        # Les figures sont produites par une classe séparée, qui ne calcule rien : on lui
-        # donne les chemins déjà résolus et le contexte d'affichage, elle reçoit ensuite
-        # les tableaux renvoyés par les méthodes de validation croisée.
         figures = VisualisationResultats(
-            chemins=ridge.get_path_file_by_plateform(plateforme),
+            chemins=ridge.chemins,
             subject=SUB,
             layer=LAYER,
             flag_precision_voxel=flag_precision_voxel,
@@ -1657,7 +1512,7 @@ if __name__ == "__main__":
         # (fichier d'annotations de l'atlas cneuromod26) ne sont pas la même chose.
         # `composition_scopes` légende la figure de comparaison : sans elle, un scope
         # nommé "ROIs" ou "visuelles" ne dit pas quelles aires il recouvre. On réutilise
-        # les MÊMES constantes que les masques ci-dessus, jamais une liste recopiée à la
+        # les mêmes constantes que les masques ci-dessus, jamais une liste recopiée à la
         # main, sinon la légende finirait par mentir sur ce qui a été calculé.
         if flag_precision_voxel:
             masque_rois = ridge._charger_masque_roi(
@@ -1687,37 +1542,41 @@ if __name__ == "__main__":
         # sans lui le split externe change à chaque exécution.
         #
         # noqa B023 : les lambdas capturent `ridge`, défini par l'itération courante de
-        # la boucle `for SUB`. C'est bien ce qu'on veut — elles sont construites ET
-        # appelées à l'intérieur de cette même itération, jamais conservées au-delà.
-        methodes = {
-            # Seule méthode qui produit aussi un score de Pearson (second panneau de la
-            # figure accuracy) : elle n'a pas de `seed`, son découpage est fixé par le
-            # protocole CNeuroMod-THINGS.
-            "one_cycle": lambda masque: ridge.nested_cross_validation_one_cycle(  # noqa: B023
-                alphas, masque_roi=masque
-            ),
-            # "ridgecv_loo_session": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="session", seed=49, masque_roi=masque),
-            # test_size=0.1 -> 21 runs de test sur 213, plus 30 à 40 runs de buffer
-            # (voisins immédiats), donc un train de 152-158 runs au lieu de 192.
-            # "ridgecv_loo_run": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
-            # Contrôle à activer si l'écart session/run est net : même split par run mais
-            # SANS buffer, donc même taille de train qu'au niveau session. L'écart qui
-            # subsiste alors ne vient plus du volume de données mais des runs frères de
-            # la session testée restés en train (cf. docstring de GroupShuffleSplitRun).
-            # "ridgecv_loo_run_sans_buffer": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="run", n_buffer=0, seed=49, masque_roi=masque),
-            # chunk_length=None -> chunks = runs réels (partition : chaque run testé une fois)
-            # "chunked_trimmed_ridgecv_loo": lambda masque: ridge.nested_cross_validation_chunked_trimmed_ridgecv_loo(alphas, n_folds=10, trim_size=5, seed=49, masque_roi=masque),
-            # Coûteux (triple boucle folds × sessions internes × alphas, pas de raccourci
-            # "full_manuel": lambda masque: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
-        }
+        # la boucle `for SUB`.
+        # `one_cycle` suppose les 36 sessions de Things avec un test fixe en 14-16 :
+        # inapplicable à Friends, dont les sessions vont jusqu'à 56 avec des trous
+        # (la méthode lève d'elle-même si on essaie). `ridgecv_loo` au niveau
+        # session en est le plus proche sans hypothèse sur le nombre de sessions :
+        # `GroupShuffleSplitSession` tire des sessions entières via `np.unique`.
+        if TACHES == "things":
+            methodes = {
+                "one_cycle": lambda masque: ridge.nested_cross_validation_one_cycle(  # noqa: B023
+                    alphas, masque_roi=masque
+                ),
+            }
+        else:
+            methodes = {
+                "ridgecv_loo_session": lambda masque: (
+                    ridge.nested_cross_validation_ridgecv_loo(  # noqa: B023
+                        alphas,
+                        n_folds=10,
+                        test_size=0.1,
+                        niveau_split="session",
+                        seed=49,
+                        masque_roi=masque,
+                    )
+                ),
+            }
+
+        # Variantes déjà éprouvées sur Things, à recopier dans `methodes` au besoin :
+        # "ridgecv_loo_session": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="session", seed=49, masque_roi=masque),
+        # "ridgecv_loo_run": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
+        # "ridgecv_loo_run_sans_buffer": lambda masque: ridge.nested_cross_validation_ridgecv_loo(alphas, n_folds=10, test_size=0.1, niveau_split="run", n_buffer=0, seed=49, masque_roi=masque),
+        # "chunked_trimmed_ridgecv_loo": lambda masque: ridge.nested_cross_validation_chunked_trimmed_ridgecv_loo(alphas, n_folds=10, trim_size=5, seed=49, masque_roi=masque),
+        # "full_manuel": lambda masque: ridge.nested_cross_validation_full_manuel(alphas, n_folds=10, test_size=0.1, niveau_split="run", seed=49, masque_roi=masque),
 
         # Scope sur lequel la CV est RÉELLEMENT calculée. None = tout (cerveau entier
-        # ou toutes les parcelles). Chaque voxel étant régressé indépendamment des
-        # autres, les scopes plus petits se déduisent ensuite par simple sélection de
-        # colonnes : inutile de relancer la CV, les valeurs sont identiques au bit
-        # près (cf. `ResultatsCV.restreindre` et test/test_equivalence_scopes.py).
-        # Le restreindre limite mécaniquement les scopes comparables, qui doivent en
-        # être des sous-ensembles.
+        # ou toutes les parcelles).
         scope_cv = None
 
         # Scope qui reçoit la planche détaillée (cartes cérébrales, histogrammes
@@ -1729,13 +1588,10 @@ if __name__ == "__main__":
         for nom_methode, executer in methodes.items():
             print(f"\n{'-' * 60}\n[{nom_methode}] — {SUB}\n{'-' * 60}")
 
-            # UNE seule CV par méthode, donc un seul chargement des données : c'est
-            # `_selection_X_Y` -> `create_X_Y_total()` qui domine le temps d'exécution.
             resultats = executer(scope_cv)
 
             # 1. Synthèse des scopes, sans aucune CV en plus : ce sont les mêmes
-            # résultats restreints à des sous-ensembles de colonnes. Calculée d'abord,
-            # car elle est passée à la planche, qui l'intègre au lieu d'un second PNG.
+            # résultats restreints à des sous-ensembles de colonnes.
             r2_par_scope, pearson_par_scope = {}, {}
             for nom_scope, masque in scopes.items():
                 if not scope_disponible(masque, scope_cv):
@@ -1746,7 +1602,7 @@ if __name__ == "__main__":
                 if restreints.pearson_tous_les_tests is not None:
                     pearson_par_scope[nom_scope] = restreints.pearson_tous_les_tests
 
-            # 2. Planche UNIQUE : figures détaillées du scope désigné + comparaison.
+            # 2. Planche unique : figures détaillées du scope désigné + comparaison.
             masque_detaille = scopes[scope_detaille]
             if not scope_disponible(masque_detaille, scope_cv):
                 raise ValueError(
@@ -1754,7 +1610,7 @@ if __name__ == "__main__":
                     "sur lequel la CV a tourné : impossible d'en tirer une planche."
                 )
             figures.generer_toutes_les_figures(
-                f"{nom_methode}_{scope_detaille}",
+                f"{TACHES}_{nom_methode}_{scope_detaille}",
                 resultats.restreindre(masque_relatif(masque_detaille, scope_cv)),
                 alphas,
                 masque_roi=masque_detaille,

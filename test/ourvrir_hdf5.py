@@ -47,6 +47,6 @@ def explorer_hdf5(chemin: Path) -> None:
 
 if __name__ == "__main__":
     chemin = Path(
-        "../data/brain_map_subj/sub-01_space-T1w_desc-ROImasks_voxelAnnotations.h5"
+        "../data/friends.timeseries/timeseries/cneuromod2026/sub-01/sub-01_task-friends_space-MNI152NLin2009cAsym_atlas-cneuromod26_desc-1134Parcels_timeseries.h5"
     )
     explorer_hdf5(chemin)
